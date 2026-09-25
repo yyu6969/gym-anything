@@ -1,0 +1,31 @@
+{
+  "id": "triage_windows_build_failure@1",
+  "version": "1.0",
+  "env_id": "gitlab_env@0.1",
+  "name": "Triage the Windows build failure",
+  "description": "GitLab is open to the Issues list for the imported GitLab CLI project. Triage the open issue whose reproduction says that `go test ./...` fails on Windows because test files use both `syscall.Stat_t` and `renameio.NewPendingFile`. Assign that issue to yourself, preserve its existing labels and add the existing `automation:quick-win-judged` label, set its due date to 2026-10-02, and add this exact comment: `Confirmed as the Windows build release blocker for the next patch. Please add non-Windows build tags and regression coverage.` Keep the issue open and finish on its detail page.",
+  "difficulty": "hard",
+  "init": {
+    "timeout_sec": 600,
+    "max_steps": 70,
+    "reward_type": "sparse"
+  },
+  "hooks": {
+    "pre_task": "'bash /workspace/tasks/triage_windows_build_failure/setup_task.sh'",
+    "pre_task_timeout": 10800
+  },
+  "metadata": {
+    "source_project": "https://gitlab.com/gitlab-org/cli",
+    "target_source_issue_iid": 8551,
+    "target_source_issue_url": "https://gitlab.com/gitlab-org/cli/-/work_items/8551",
+    "required_label": "automation:quick-win-judged",
+    "required_due_date": "2026-10-02",
+    "required_comment": "Confirmed as the Windows build release blocker for the next patch. Please add non-Windows build tags and regression coverage."
+  },
+  "success": {
+    "mode": "program",
+    "spec": {
+      "program": "verifier.py::verify_triage_windows_build_failure"
+    }
+  }
+}

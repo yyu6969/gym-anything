@@ -1,0 +1,41 @@
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:18.11.12-ce.0
+    container_name: gitlab
+    hostname: gitlab.local
+    restart: unless-stopped
+    shm_size: "256m"
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://gitlab.local'
+        gitlab_rails['initial_root_password'] = 'N7v!4Qz@8Lm#2Rx%'
+        gitlab_rails['gitlab_shell_ssh_port'] = 2224
+        gitlab_rails['env'] = {
+          'MALLOC_CONF' => 'dirty_decay_ms:1000,muzzy_decay_ms:1000'
+        }
+        letsencrypt['enable'] = false
+        puma['worker_processes'] = 0
+        puma['exporter_enabled'] = false
+        sidekiq['concurrency'] = 10
+        sidekiq['metrics_enabled'] = false
+        alertmanager['enable'] = false
+        gitlab_exporter['enable'] = false
+        gitlab_kas['enable'] = false
+        node_exporter['enable'] = false
+        postgres_exporter['enable'] = false
+        prometheus_monitoring['enable'] = false
+        prometheus['enable'] = false
+        redis_exporter['enable'] = false
+    ports:
+      - "80:80"
+      - "2224:22"
+    volumes:
+      - /home/ga/gitlab/config:/etc/gitlab
+      - /home/ga/gitlab/logs:/var/log/gitlab
+      - /home/ga/gitlab/data:/var/opt/gitlab
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost/-/readiness"]
+      interval: 15s
+      timeout: 10s
+      retries: 80
+      start_period: 180s
