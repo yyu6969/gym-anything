@@ -2,19 +2,15 @@
 set -euo pipefail
 
 echo "=== Setting up triage_windows_build_failure task ==="
+rm -f /tmp/gitlab_task_ready
 
 source /workspace/scripts/task_utils.sh
 
 TARGET_SOURCE_IID=8551
 REQUIRED_COMMENT='Confirmed as the Windows build release blocker for the next patch. Please add non-Windows build tags and regression coverage.'
 
-if ! wait_for_gitlab_setup 10800; then
-  echo "ERROR: GitLab background setup did not complete"
-  exit 1
-fi
-
-if ! wait_for_gitlab_api 300; then
-  echo "ERROR: GitLab API is not reachable"
+if ! ensure_gitlab_ready 600; then
+  echo "ERROR: GitLab services are not ready"
   exit 1
 fi
 
@@ -66,12 +62,13 @@ echo "Opening authenticated browser at ${ISSUES_URL}"
 if ! login_gitlab_browser "$ISSUES_URL"; then
   echo "ERROR: Could not prepare the authenticated GitLab Issues view"
   DISPLAY=:1 XAUTHORITY="$(xauthority_path)" wmctrl -l 2>/dev/null || true
-  cat /tmp/epiphany_gitlab.log 2>/dev/null || true
+  cat /tmp/firefox_gitlab.log 2>/dev/null || true
   exit 1
 fi
 
 sleep 3
 capture_browser_window /tmp/gitlab_task_start.png
+touch /tmp/gitlab_task_ready
 
 echo "Project id: ${PROJECT_ID}"
 echo "Target local issue iid: ${TARGET_IID}"

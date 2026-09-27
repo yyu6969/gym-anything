@@ -5,8 +5,6 @@ GITLAB_ROOT_USER="root"
 GITLAB_ROOT_PASSWORD="N7v!4Qz@8Lm#2Rx%"
 GITLAB_ROOT_TOKEN="gitlab-seed-token123"
 GITLAB_MANIFEST="/home/ga/gitlab/seed/seed_manifest.json"
-GITLAB_SETUP_STATUS="/var/lib/gym-anything-gitlab/setup.status"
-GITLAB_SETUP_LOG="/home/ga/gitlab_setup_background.log"
 
 gitlab_api() {
   local method="$1"
@@ -14,6 +12,23 @@ gitlab_api() {
   shift 2
   curl -fsS -X "$method" -H "PRIVATE-TOKEN: ${GITLAB_ROOT_TOKEN}" \
     "${GITLAB_URL}/api/v4/${endpoint}" "$@"
+}
+
+wait_for_gitlab_readiness() {
+  local timeout="${1:-300}"
+  local elapsed=0
+  local code="000"
+  while [ "$elapsed" -lt "$timeout" ]; do
+    code=$(curl -sS -o /tmp/gitlab_task_readiness.json -w "%{http_code}" \
+      "${GITLAB_URL}/-/readiness?all=1" 2>/dev/null || true)
+    if [ "$code" = "200" ] && \
+      jq -e '.status == "ok"' /tmp/gitlab_task_readiness.json >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 3
+    elapsed=$((elapsed + 3))
+  done
+  return 1
 }
 
 wait_for_gitlab_api() {
@@ -29,34 +44,40 @@ wait_for_gitlab_api() {
   return 1
 }
 
-wait_for_gitlab_setup() {
-  local timeout="${1:-10800}"
-  local elapsed=0
-  local status="pending"
-  while [ "$elapsed" -lt "$timeout" ]; do
-    if [ -f "$GITLAB_SETUP_STATUS" ]; then
-      status=$(cat "$GITLAB_SETUP_STATUS")
-      if [ "$status" = "success" ] && wait_for_gitlab_api 30; then
-        echo "GitLab background setup is complete after ${elapsed}s"
-        return 0
-      fi
-      if [[ "$status" == failed:* ]]; then
-        echo "ERROR: GitLab background setup failed (${status})"
-        tail -200 "$GITLAB_SETUP_LOG" 2>/dev/null || true
-        return 1
-      fi
-    fi
+show_gitlab_diagnostics() {
+  gitlab-ctl status 2>/dev/null || true
+  tail -100 /var/log/gitlab/gitlab-rails/production.log 2>/dev/null || true
+  tail -100 /var/log/gitlab/puma/current 2>/dev/null || true
+  tail -100 /var/log/gitlab/sidekiq/current 2>/dev/null || true
+  tail -100 /var/log/gitlab/nginx/gitlab_error.log 2>/dev/null || true
+}
 
-    sleep 10
-    elapsed=$((elapsed + 10))
-    if [ $((elapsed % 60)) -eq 0 ]; then
-      echo "  waiting for GitLab background setup... ${elapsed}s"
-      tail -5 "$GITLAB_SETUP_LOG" 2>/dev/null || true
-    fi
-  done
+ensure_gitlab_ready() {
+  local timeout="${1:-900}"
+  if wait_for_gitlab_readiness 30 && wait_for_gitlab_api 30; then
+    echo "Native GitLab readiness and root API token are valid"
+    return 0
+  fi
 
-  echo "ERROR: GitLab background setup did not finish within ${timeout}s"
-  tail -200 "$GITLAB_SETUP_LOG" 2>/dev/null || true
+  echo "GitLab is not responding after cache restore; starting its native services..."
+  if ! systemctl start gitlab-runsvdir.service; then
+    echo "ERROR: Could not start gitlab-runsvdir.service"
+    show_gitlab_diagnostics
+    return 1
+  fi
+  if ! gitlab-ctl start; then
+    echo "ERROR: gitlab-ctl start failed"
+    show_gitlab_diagnostics
+    return 1
+  fi
+  if wait_for_gitlab_readiness "$timeout" && wait_for_gitlab_api 120; then
+    echo "Native GitLab readiness and root API token recovered"
+    return 0
+  fi
+
+  echo "ERROR: Native GitLab did not become ready with a valid root API token"
+  cat /tmp/gitlab_task_readiness.json 2>/dev/null || true
+  show_gitlab_diagnostics
   return 1
 }
 
@@ -85,7 +106,7 @@ xauthority_path() {
 }
 
 browser_window_id() {
-  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool search --onlyvisible --class 'Epiphany' 2>/dev/null | tail -1
+  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool search --onlyvisible --class firefox 2>/dev/null | tail -1
 }
 
 wait_for_browser_window() {
@@ -93,6 +114,38 @@ wait_for_browser_window() {
   local elapsed=0
   while [ "$elapsed" -lt "$timeout" ]; do
     if [ -n "$(browser_window_id)" ]; then
+      return 0
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  return 1
+}
+
+wait_for_browser_title() {
+  local pattern="$1"
+  local timeout="${2:-60}"
+  local elapsed=0
+  while [ "$elapsed" -lt "$timeout" ]; do
+    if browser_title 2>/dev/null | grep -qiE "$pattern"; then
+      return 0
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  return 1
+}
+
+wait_for_browser_title_without() {
+  local required_pattern="$1"
+  local excluded_pattern="$2"
+  local timeout="${3:-60}"
+  local elapsed=0
+  local title=""
+  while [ "$elapsed" -lt "$timeout" ]; do
+    title=$(browser_title 2>/dev/null || true)
+    if printf '%s\n' "$title" | grep -qiE "$required_pattern" && \
+      ! printf '%s\n' "$title" | grep -qiE "$excluded_pattern"; then
       return 0
     fi
     sleep 1
@@ -122,20 +175,43 @@ navigate_browser() {
   wid=$(browser_window_id)
   [ -n "$wid" ] || return 1
   focus_browser
-  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key --window "$wid" ctrl+l
-  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool type --window "$wid" --delay 1 "$url"
-  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key --window "$wid" Return
+  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool windowactivate --sync "$wid"
+  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key ctrl+l
+  sleep 0.3
+  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool type --delay 35 "$url"
+  sleep 0.3
+  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key Return
+}
+
+prepare_firefox_profile() {
+  local profile="/home/ga/.mozilla/firefox/gitlab-benchmark"
+  install -d -m 0700 -o ga -g ga "$profile"
+  cat > "$profile/user.js" <<'PREFSEOF'
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("security.insecure_field_warning.contextual.enabled", false);
+user_pref("signon.rememberSignons", false);
+PREFSEOF
+  chown ga:ga "$profile/user.js"
+  install -d -m 0755 /etc/firefox/policies
+  cat > /etc/firefox/policies/policies.json <<'POLICYEOF'
+{"policies":{"OfferToSaveLogins":false,"PasswordManagerEnabled":false}}
+POLICYEOF
 }
 
 start_browser() {
   local url="$1"
-  pkill -TERM -f '/usr/bin/epiphany-browser' 2>/dev/null || true
+  pkill -TERM -x firefox 2>/dev/null || true
   sleep 2
-  pkill -KILL -f '/usr/bin/epiphany-browser' 2>/dev/null || true
+  pkill -KILL -x firefox 2>/dev/null || true
 
   local xauth
+  local profile="/home/ga/.mozilla/firefox/gitlab-benchmark"
   xauth=$(xauthority_path)
-  su - ga -c "setsid env DISPLAY=:1 XAUTHORITY='${xauth}' XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus epiphany-browser '${url}' >/tmp/epiphany_gitlab.log 2>&1 </dev/null &"
+  prepare_firefox_profile
+  su - ga -c "setsid env DISPLAY=:1 XAUTHORITY='${xauth}' XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus firefox --no-remote --profile '${profile}' --private-window '${url}' >/tmp/firefox_gitlab.log 2>&1 </dev/null &"
   wait_for_browser_window 60
   focus_browser
 }
@@ -143,24 +219,47 @@ start_browser() {
 login_gitlab_browser() {
   local target_url="$1"
   local wid
+  local username_x
+  local username_y
 
   start_browser "${GITLAB_URL}/users/sign_in" || return 1
-  sleep 8
-  wid=$(browser_window_id)
-  [ -n "$wid" ] || return 1
+  if wait_for_browser_title 'Sign in.*GitLab|GitLab.*Sign in' 60; then
+    wid=$(browser_window_id)
+    [ -n "$wid" ] || return 1
 
-  # GitLab 18 sign-in form at 1920x1080. Explicit clicks avoid browser chrome tab-order drift.
-  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool mousemove --window "$wid" 960 410 click 1
-  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key --window "$wid" ctrl+a
-  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool type --window "$wid" --delay 35 "$GITLAB_ROOT_USER"
-  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool mousemove --window "$wid" 960 490 click 1
-  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key --window "$wid" ctrl+a
-  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool type --window "$wid" --delay 35 "$GITLAB_ROOT_PASSWORD"
-  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key --window "$wid" Return
-  sleep 10
+    # The GitLab sign-in page does not reliably autofocus its username field.
+    # Target it relative to the pinned Firefox window, then send paced input to
+    # the active window. Direct --window key events can be dropped by Firefox.
+    focus_browser
+    DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool windowactivate --sync "$wid"
+    sleep 2
+    eval "$(DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool getwindowgeometry --shell "$wid")"
+    username_x=$((WIDTH / 2))
+    username_y=$((HEIGHT * 32 / 100))
+    DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool mousemove --sync --window "$wid" "$username_x" "$username_y" click 1
+    sleep 0.5
+    DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key ctrl+a
+    DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool type --delay 100 "$GITLAB_ROOT_USER"
+    sleep 0.5
+    DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key Tab
+    sleep 0.5
+    DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key ctrl+a
+    DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool type --delay 100 "$GITLAB_ROOT_PASSWORD"
+    sleep 0.5
+    # Dismiss Firefox's HTTP password warning while retaining field focus.
+    DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key Escape
+    sleep 0.5
+    DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key Return
+    wait_for_browser_title_without 'GitLab' 'Sign in' 90 || return 1
+  elif ! wait_for_browser_title_without 'GitLab' 'Sign in' 5; then
+    return 1
+  fi
 
   navigate_browser "$target_url"
-  sleep 10
+  wait_for_browser_title '(Issues|Work items).*GitLab|GitLab.*(Issues|Work items)' 90 || return 1
+  # GitLab can show a first-visit Work Items tour over the seeded issue list.
+  DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key Escape
+  sleep 0.5
   focus_browser
 
   if browser_title | grep -qi 'sign in'; then

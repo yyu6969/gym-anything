@@ -4,12 +4,10 @@ set -euo pipefail
 echo "=== Installing GitLab environment dependencies ==="
 
 export DEBIAN_FRONTEND=noninteractive
-COMPOSE_VERSION="v2.39.4"
-COMPOSE_SHA256="7af95166a730b87e172d4fc9aefea8725d3c6c7327d59149267b452114ddb7d4"
-COMPOSE_URL="https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64"
-GITLAB_IMAGE="gitlab/gitlab-ce:18.11.12-ce.0"
-IMAGE_PULL_DIR="/var/lib/gym-anything-gitlab"
-IMAGE_PULL_SCRIPT="/usr/local/sbin/pull-gitlab-image.sh"
+GITLAB_VERSION="18.11.12-ce.0"
+GITLAB_URL="http://gitlab.local"
+GITLAB_ROOT_PASSWORD='N7v!4Qz@8Lm#2Rx%'
+GITLAB_REPOSITORY_SCRIPT="/tmp/gitlab-ce-repository.sh"
 
 APT_HOOKS=(
   /etc/apt/apt.conf.d/20packagekit
@@ -30,90 +28,89 @@ for hook in "${APT_HOOKS[@]}"; do
     mv "$hook" "${hook}.gym-anything-disabled"
   fi
 done
+
 apt-get update
 apt-get install -y \
   ca-certificates \
   curl \
   dbus-x11 \
-  docker.io \
-  epiphany-browser \
+  firefox \
   git \
   imagemagick \
   jq \
+  locales \
   netcat-openbsd \
+  openssh-server \
+  perl \
   python3 \
   python3-requests \
   wmctrl \
   x11-apps \
   x11-utils \
   xdotool
+
+echo "Configuring the official GitLab CE package repository..."
+curl -fsSL --retry 5 --retry-delay 3 \
+  https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.deb.sh \
+  -o "$GITLAB_REPOSITORY_SCRIPT"
+bash "$GITLAB_REPOSITORY_SCRIPT"
+apt-get update
+
+if ! apt-cache madison gitlab-ce | awk '{print $3}' | grep -Fx "$GITLAB_VERSION" >/dev/null; then
+  echo "ERROR: GitLab CE package ${GITLAB_VERSION} is not available for this guest"
+  exit 1
+fi
+
+if ! grep -qE '(^|[[:space:]])gitlab\.local([[:space:]]|$)' /etc/hosts; then
+  echo "127.0.0.1 gitlab.local" >> /etc/hosts
+fi
+
+install -d -m 0755 /etc/gitlab
+cat > /etc/gitlab/gitlab.rb <<'GITLABEOF'
+external_url 'http://gitlab.local'
+gitlab_rails['gitlab_shell_ssh_port'] = 22
+gitlab_rails['env'] = {
+  'MALLOC_CONF' => 'dirty_decay_ms:1000,muzzy_decay_ms:1000'
+}
+letsencrypt['enable'] = false
+nginx['listen_addresses'] = ['127.0.0.1']
+puma['worker_processes'] = 0
+puma['exporter_enabled'] = false
+sidekiq['concurrency'] = 10
+sidekiq['metrics_enabled'] = false
+alertmanager['enable'] = false
+gitlab_exporter['enable'] = false
+gitlab_kas['enable'] = false
+node_exporter['enable'] = false
+postgres_exporter['enable'] = false
+prometheus_monitoring['enable'] = false
+prometheus['enable'] = false
+redis_exporter['enable'] = false
+GITLABEOF
+
+echo "Installing pinned GitLab CE ${GITLAB_VERSION} directly in the guest..."
+EXTERNAL_URL="$GITLAB_URL" GITLAB_ROOT_PASSWORD="$GITLAB_ROOT_PASSWORD" \
+  apt-get install -y "gitlab-ce=${GITLAB_VERSION}"
+apt-mark hold gitlab-ce
+
+installed_version=$(dpkg-query -W -f='${Version}' gitlab-ce)
+if [ "$installed_version" != "$GITLAB_VERSION" ]; then
+  echo "ERROR: Installed GitLab CE ${installed_version}; expected ${GITLAB_VERSION}"
+  exit 1
+fi
+
+echo "Applying native GitLab configuration..."
+gitlab-ctl reconfigure
+systemctl enable gitlab-runsvdir.service
+gitlab-ctl start
+
 restore_apt_hooks
 trap - EXIT
 
-install -d -m 0755 /usr/local/lib/docker/cli-plugins
-curl -fsSL --retry 5 --retry-delay 3 "$COMPOSE_URL" \
-  -o /usr/local/lib/docker/cli-plugins/docker-compose
-echo "${COMPOSE_SHA256}  /usr/local/lib/docker/cli-plugins/docker-compose" | sha256sum -c -
-chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose
-
-systemctl enable docker
-systemctl start docker
-usermod -aG docker ga 2>/dev/null || true
-
-echo "Waiting for Docker daemon..."
-for attempt in $(seq 1 60); do
-  if docker info >/dev/null 2>&1; then
-    echo "Docker is ready after attempt ${attempt}"
-    break
-  fi
-  if [ "$attempt" -eq 60 ]; then
-    echo "ERROR: Docker daemon did not become ready"
-    exit 1
-  fi
-  sleep 2
-done
-
-mkdir -p "$IMAGE_PULL_DIR"
-cat > "$IMAGE_PULL_SCRIPT" <<'PULLEOF'
-#!/bin/bash
-set -uo pipefail
-
-GITLAB_IMAGE="gitlab/gitlab-ce:18.11.12-ce.0"
-IMAGE_PULL_DIR="/var/lib/gym-anything-gitlab"
-STATUS_FILE="${IMAGE_PULL_DIR}/image-pull.status"
-
-# Give the runtime's guest-side Docker Hub login a chance to run after the
-# pre_start hook returns. Anonymous pulls still work when no credentials exist.
-sleep 10
-
-if docker pull "$GITLAB_IMAGE"; then
-  printf 'success\n' > "$STATUS_FILE"
-  exit 0
-else
-  status=$?
-  printf 'failed:%s\n' "$status" > "$STATUS_FILE"
-  exit "$status"
-fi
-PULLEOF
-chmod 0755 "$IMAGE_PULL_SCRIPT"
-
-if docker image inspect "$GITLAB_IMAGE" >/dev/null 2>&1; then
-  printf 'success\n' > "$IMAGE_PULL_DIR/image-pull.status"
-  echo "Pinned GitLab CE image is already available"
-else
-  rm -f "$IMAGE_PULL_DIR/image-pull.status"
-  echo "Starting pinned GitLab CE image pull in the background..."
-  setsid nohup "$IMAGE_PULL_SCRIPT" \
-    > "$IMAGE_PULL_DIR/image-pull.log" 2>&1 </dev/null &
-  echo "$!" > "$IMAGE_PULL_DIR/image-pull.pid"
-  echo "GitLab image pull PID: $!"
-fi
-
 apt-get clean
 rm -rf /var/lib/apt/lists/*
+rm -f "$GITLAB_REPOSITORY_SCRIPT"
 
-echo "Docker: $(docker --version)"
-echo "Docker Compose: $(docker compose version)"
-echo "Epiphany: $(epiphany-browser --version 2>/dev/null || true)"
-echo "GitLab image pull status: ${IMAGE_PULL_DIR}/image-pull.status"
-echo "=== GitLab dependency installation complete ==="
+echo "GitLab CE package: ${installed_version}"
+echo "Firefox: $(firefox --version 2>/dev/null || true)"
+echo "=== Native GitLab installation complete ==="
