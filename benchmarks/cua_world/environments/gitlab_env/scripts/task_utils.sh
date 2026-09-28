@@ -3,6 +3,8 @@
 GITLAB_URL="http://gitlab.local"
 GITLAB_ROOT_USER="root"
 GITLAB_ROOT_PASSWORD="N7v!4Qz@8Lm#2Rx%"
+GITLAB_BROWSER_USER="byteblaze"
+GITLAB_BROWSER_PASSWORD="N7v!4Qz@8Lm#2Rx%"
 GITLAB_ROOT_TOKEN="gitlab-seed-token123"
 GITLAB_MANIFEST="/home/ga/gitlab/seed/seed_manifest.json"
 
@@ -218,6 +220,7 @@ start_browser() {
 
 login_gitlab_browser() {
   local target_url="$1"
+  local expected_title_pattern="${2:-(Issues|Work items).*GitLab|GitLab.*(Issues|Work items)}"
   local wid
   local username_x
   local username_y
@@ -239,12 +242,12 @@ login_gitlab_browser() {
     DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool mousemove --sync --window "$wid" "$username_x" "$username_y" click 1
     sleep 0.5
     DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key ctrl+a
-    DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool type --delay 100 "$GITLAB_ROOT_USER"
+    DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool type --delay 100 "$GITLAB_BROWSER_USER"
     sleep 0.5
     DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key Tab
     sleep 0.5
     DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key ctrl+a
-    DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool type --delay 100 "$GITLAB_ROOT_PASSWORD"
+    DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool type --delay 100 "$GITLAB_BROWSER_PASSWORD"
     sleep 0.5
     # Dismiss Firefox's HTTP password warning while retaining field focus.
     DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key Escape
@@ -256,7 +259,7 @@ login_gitlab_browser() {
   fi
 
   navigate_browser "$target_url"
-  wait_for_browser_title '(Issues|Work items).*GitLab|GitLab.*(Issues|Work items)' 90 || return 1
+  wait_for_browser_title "$expected_title_pattern" 90 || return 1
   # GitLab can show a first-visit Work Items tour over the seeded issue list.
   DISPLAY=:1 XAUTHORITY="$(xauthority_path)" xdotool key Escape
   sleep 0.5

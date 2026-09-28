@@ -1,62 +1,80 @@
-# GitLab CE environment
+# Shared GitLab CE environment
 
-This environment installs the pinned GitLab Community Edition package
-`18.11.12-ce.0` directly in the Ubuntu guest. GitLab's Omnibus-managed
-PostgreSQL, Redis, Gitaly, Puma, Sidekiq, Workhorse, and NGINX services run
-under `gitlab-runsvdir.service`; no nested Docker runtime is required. The
-12 GB guest retains the constrained-memory configuration: single-process
-Puma, lower Sidekiq concurrency, and disabled monitoring exporters.
+This environment installs pinned GitLab Community Edition `18.11.12-ce.0`
+directly in the Ubuntu guest. PostgreSQL, Redis, Gitaly, Puma, Sidekiq,
+Workhorse, and NGINX are managed by Omnibus under
+`gitlab-runsvdir.service`; there is no nested Docker runtime.
 
-The installation hook configures the official GitLab package repository,
-installs and pins the exact package version, writes `/etc/gitlab/gitlab.rb`,
-and runs `gitlab-ctl reconfigure`. The synchronous setup hook then waits for
-the full readiness endpoint, creates the deterministic root token, explicitly
-enables repository-by-URL import, seeds the application, and opens Firefox at
-`http://gitlab.local`. A successful `post_start` hook is the stable cache
-boundary, so the environment uses `post_start` as its default cache level.
+It reconstructs one dependency-complete GitLab baseline shared by all 172
+Wonderbread/WebArena GitLab tasks. It does not create an environment or
+dataset per task, and it does not implement per-task reset logic.
 
-A filesystem cache restore does not assume that cached processes remain alive.
-The task hook starts `gitlab-runsvdir.service` and the Omnibus services when
-needed, waits for full readiness, validates the root API token, resets the
-task-specific state, authenticates Firefox, and navigates to the project's
-Issues page before returning.
+## Logical dataset
 
-## Real data
+The read-only source dataset is mounted from:
 
-The setup imports the real public
-[`gitlab-org/cli`](https://gitlab.com/gitlab-org/cli) Git repository, then
-fetches seven named issues through the public GitLab API and recreates their
-titles, descriptions, labels, issue types, and creation timestamps in the
-local instance. Setup writes both the unmodified API records and a local/source
-ID mapping to:
+`/data/user_data/yingjiey/webarena-reference/extracted/gitlab_shared`
 
-- `/home/ga/gitlab/seed/source_snapshot.json`
-- `/home/ga/gitlab/seed/seed_manifest.json`
+to `/workspace/gitlab_shared` in the guest. Setup performs three phases:
 
-The selected public source issue IDs are `8551`, `8565`, `7554`, `7685`,
-`979`, `939`, and `903`. The task targets source issue
-[`#8551`](https://gitlab.com/gitlab-org/cli/-/work_items/8551).
+1. `prepare_shared_baseline.py` verifies schemas, checksums, all 28 Git
+   bundles, required refs, and all 168 declared initial-state exclusions.
+2. `seed_gitlab.rb` reconstructs application entities through GitLab Rails
+   services and restores repositories through GitLab's `RepoRestorer`.
+3. `validate_shared_baseline.py` independently validates the live API,
+   repository refs and files, declared absences, aggregate counts, and
+   loopback-only listeners.
+
+The seeded baseline contains:
+
+- 39 projects and 22 personal namespace dependencies
+- 28 complete repositories with canonical history and refs
+- 70 extracted identity records: 59 GitLab-account records normalized to 45
+  unique task-relevant accounts, plus 11 commit-only identities
+- 14 additional dependency-only accounts required to realize personal
+  namespaces that are not among the 45 task-relevant accounts
+- 13 direct project memberships
+- 29 labels, 1 milestone, 10 issues, 8 merge requests, and 85 notes
+- 168 task-created entities or relationships that are verified absent
+
+Repository creation and merge-request callbacks can create target-managed refs.
+After application entities are created, the seeder reapplies only MR-touched
+bundles so every extracted ref and OID remains canonical.
 
 ## Access
 
 - URL: `http://gitlab.local`
-- Web account: `root` / `N7v!4Qz@8Lm#2Rx%`
+- Browser account: `byteblaze` / `N7v!4Qz@8Lm#2Rx%`
+- Administrative account: `root` / `N7v!4Qz@8Lm#2Rx%`
+- Deterministic administrative API token: `gitlab-seed-token123`
 - Native service manager: `gitlab-ctl` / `gitlab-runsvdir.service`
 
-The fixed API token exists only for deterministic environment and task setup.
-The interactive task starts with Firefox already authenticated and focused on
-the imported project's real issue backlog.
+Firefox is launched already authenticated as `byteblaze`. GitLab's HTTP,
+status, Puma, and Workhorse listeners bind only to guest loopback; runner-owned
+SSH/VNC/VM forwarding is unchanged.
 
-GitLab NGINX listens only on guest loopback. There are no Docker-published
-GitLab ports and no GitLab listener is bound to `0.0.0.0` or `[::]`.
-Host-facing VM, VNC, and SSH forwarding remains owned by the runner and is not
-changed by this environment.
+## Validation artifacts
 
-## Task
+A successful setup writes user-readable reports to:
 
-`triage_windows_build_failure` asks the agent to identify the Windows-only
-compilation failure from technical evidence and complete a realistic triage
-workflow across issue search, assignment, labels, due date, and discussion.
+- `/home/ga/gitlab/seed/dataset_preflight.json`
+- `/home/ga/gitlab/seed/seed_manifest.json`
+- `/home/ga/gitlab/seed/baseline_validation.json`
+
+The setup prints `Environment Ready: shared GitLab baseline validated` only
+after the readiness endpoint, API token, live baseline validator, and
+authenticated browser dashboard have all passed.
+
+Intentional target-version normalizations are recorded in
+`seed_manifest.json`: source database IDs are remapped to semantic
+identifiers, repository storage paths are target-managed, and six
+`LegacyDiffNote` rows are represented as ordinary notes because the logical
+extraction has no legacy diff-position payload. Bodies, authors, parents, and
+timestamps remain preserved.
+
+The environment uses the successful `post_start` state as its default cache
+boundary. Filesystem restores restart native services and recheck readiness;
+task-specific deterministic resets are a separate follow-up phase.
 
 ## Source references
 
@@ -64,4 +82,3 @@ workflow across issue search, assignment, labels, due date, and discussion.
 - GitLab constrained-memory configuration: <https://docs.gitlab.com/omnibus/settings/memory_constrained_envs/>
 - GitLab health and readiness endpoints: <https://docs.gitlab.com/administration/monitoring/health_check/>
 - Programmatic personal access tokens: <https://docs.gitlab.com/user/profile/personal_access_tokens/>
-- GitLab CLI source project: <https://gitlab.com/gitlab-org/cli>

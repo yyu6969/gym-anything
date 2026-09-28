@@ -37,6 +37,7 @@ apt-get install -y \
   firefox \
   git \
   imagemagick \
+  iproute2 \
   jq \
   locales \
   netcat-openbsd \
@@ -74,6 +75,7 @@ gitlab_rails['env'] = {
 }
 letsencrypt['enable'] = false
 nginx['listen_addresses'] = ['127.0.0.1']
+nginx['status'] = { 'listen_addresses' => ['127.0.0.1'] }
 puma['worker_processes'] = 0
 puma['exporter_enabled'] = false
 sidekiq['concurrency'] = 10
