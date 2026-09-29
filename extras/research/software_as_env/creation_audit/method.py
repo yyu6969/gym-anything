@@ -342,6 +342,35 @@ def _audit_prompt_path(memory_dir: Path, platform: str) -> str:
     return (memory_dir / "audit_prompt.md").as_posix()
 
 
+def _path_context_prompt(
+    *,
+    reference_root: Path | None,
+    workspace: Path | None,
+    environment_dir: Path | None,
+) -> str:
+    """Render explicit path ownership without changing the legacy defaults."""
+
+    if reference_root is None and workspace is None and environment_dir is None:
+        return ""
+    if reference_root is None or workspace is None or environment_dir is None:
+        raise ValueError(
+            "reference_root, workspace, and environment_dir must be supplied together"
+        )
+    return (
+        "\n\n## Repository and Output Paths\n\n"
+        f"- Gym reference repository (read-only): @{reference_root.as_posix()}\n"
+        f"- Writable agent workspace: @{workspace.as_posix()}\n"
+        f"- Target environment directory: @{environment_dir.as_posix()}\n\n"
+        "Resolve every repository-relative source or example path in the creation "
+        "and audit instructions against the Gym reference repository. The absolute "
+        "target environment directory above overrides any benchmark-relative "
+        "destination shown in those instructions. Do not modify or create files "
+        "inside the Gym reference repository. Write generated environment files "
+        "only inside the target environment directory; use the writable workspace "
+        "for any other temporary working files."
+    )
+
+
 def _aab_context_prompt(
     *,
     software: str,
@@ -455,20 +484,32 @@ def _initial_prompt(
     environment_spec: dict[str, Any] | None = None,
     task_instruction: str | None = None,
     environment_initial_state: dict[str, Any] | None = None,
+    reference_root: Path | None = None,
+    workspace: Path | None = None,
+    environment_dir: Path | None = None,
 ) -> str:
+    target = environment_dir.as_posix() if environment_dir is not None else env_dir
     prompt = (
         f"read @{_creation_prompt_path(memory_dir, platform)} and follow the prompt. "
-        f"target application is {software} and target env directory is {env_dir}. "
+        f"target application is {software} and target env directory is {target}. "
         f"Do not enter plan mode (although you are strongly encouraged to plan "
         f"before making code edits), or ask me for any input at any time. "
         f"All information is already present in the prompt file."
     )
-    return prompt + _aab_context_prompt(
-        software=software,
-        task_instruction=task_instruction,
-        environment_spec=environment_spec,
-        environment_initial_state=environment_initial_state,
-        audit=False,
+    return (
+        prompt
+        + _aab_context_prompt(
+            software=software,
+            task_instruction=task_instruction,
+            environment_spec=environment_spec,
+            environment_initial_state=environment_initial_state,
+            audit=False,
+        )
+        + _path_context_prompt(
+            reference_root=reference_root,
+            workspace=workspace,
+            environment_dir=environment_dir,
+        )
     )
 
 
@@ -479,6 +520,9 @@ def _nudge_prompt(
     task_instruction: str | None = None,
     environment_initial_state: dict[str, Any] | None = None,
     software: str | None = None,
+    reference_root: Path | None = None,
+    workspace: Path | None = None,
+    environment_dir: Path | None = None,
 ) -> str:
     prompt = (
         f"reread @{_creation_prompt_path(memory_dir, platform)}. "
@@ -486,24 +530,43 @@ def _nudge_prompt(
         f"use the visual_grounding MCP tool to interact with the running "
         f"environment)"
     )
+    path_context = _path_context_prompt(
+        reference_root=reference_root,
+        workspace=workspace,
+        environment_dir=environment_dir,
+    )
     if all(
         value is None
         for value in (task_instruction, environment_spec, environment_initial_state)
     ):
-        return prompt
-    return prompt + _aab_context_prompt(
-        software=_resolve_context_software(software, environment_spec),
-        task_instruction=task_instruction,
-        environment_spec=environment_spec,
-        environment_initial_state=environment_initial_state,
-        audit=False,
+        return prompt + path_context
+    return (
+        prompt
+        + _aab_context_prompt(
+            software=_resolve_context_software(software, environment_spec),
+            task_instruction=task_instruction,
+            environment_spec=environment_spec,
+            environment_initial_state=environment_initial_state,
+            audit=False,
+        )
+        + path_context
     )
 
 
-def _audit_explore_prompt() -> str:
-    return (
+def _audit_explore_prompt(
+    *,
+    reference_root: Path | None = None,
+    workspace: Path | None = None,
+    environment_dir: Path | None = None,
+) -> str:
+    prompt = (
         "deep explore this repository to understand what it is about, "
         "how each individual components work, etc"
+    )
+    return prompt + _path_context_prompt(
+        reference_root=reference_root,
+        workspace=workspace,
+        environment_dir=environment_dir,
     )
 
 
@@ -516,25 +579,41 @@ def _audit_run_prompt(
     task_instruction: str | None = None,
     environment_initial_state: dict[str, Any] | None = None,
     software: str | None = None,
+    reference_root: Path | None = None,
+    workspace: Path | None = None,
+    environment_dir: Path | None = None,
 ) -> str:
     audit_file_rel = (audits_dir / f"audit_{env_dir}.md").as_posix()
-    target_dir = f"{_benchmark_root(platform)}/environments/{env_dir}"
+    target_dir = (
+        environment_dir.as_posix()
+        if environment_dir is not None
+        else f"{_benchmark_root(platform)}/environments/{env_dir}"
+    )
     prompt = (
         f"read @{_audit_prompt_path(memory_dir, platform)} and follow the prompt. "
         f"target env directory is @{target_dir}. "
         f"Note: save file is {audit_file_rel}"
     )
+    path_context = _path_context_prompt(
+        reference_root=reference_root,
+        workspace=workspace,
+        environment_dir=environment_dir,
+    )
     if all(
         value is None
         for value in (task_instruction, environment_spec, environment_initial_state)
     ):
-        return prompt
-    return prompt + _aab_context_prompt(
-        software=_resolve_context_software(software, environment_spec),
-        task_instruction=task_instruction,
-        environment_spec=environment_spec,
-        environment_initial_state=environment_initial_state,
-        audit=True,
+        return prompt + path_context
+    return (
+        prompt
+        + _aab_context_prompt(
+            software=_resolve_context_software(software, environment_spec),
+            task_instruction=task_instruction,
+            environment_spec=environment_spec,
+            environment_initial_state=environment_initial_state,
+            audit=True,
+        )
+        + path_context
     )
 
 
@@ -544,6 +623,9 @@ def _audit_feedback_prompt(
     task_instruction: str | None = None,
     environment_initial_state: dict[str, Any] | None = None,
     software: str | None = None,
+    reference_root: Path | None = None,
+    workspace: Path | None = None,
+    environment_dir: Path | None = None,
 ) -> str:
     prompt = (
         f"An independent audit of your progress was performed. Here is the "
@@ -551,17 +633,26 @@ def _audit_feedback_prompt(
         f"remember to use the visual_grounding MCP tool to interact with the "
         f"running environment)"
     )
+    path_context = _path_context_prompt(
+        reference_root=reference_root,
+        workspace=workspace,
+        environment_dir=environment_dir,
+    )
     if all(
         value is None
         for value in (task_instruction, environment_spec, environment_initial_state)
     ):
-        return prompt
-    return prompt + _aab_context_prompt(
-        software=_resolve_context_software(software, environment_spec),
-        task_instruction=task_instruction,
-        environment_spec=environment_spec,
-        environment_initial_state=environment_initial_state,
-        audit=False,
+        return prompt + path_context
+    return (
+        prompt
+        + _aab_context_prompt(
+            software=_resolve_context_software(software, environment_spec),
+            task_instruction=task_instruction,
+            environment_spec=environment_spec,
+            environment_initial_state=environment_initial_state,
+            audit=False,
+        )
+        + path_context
     )
 
 
@@ -588,13 +679,42 @@ def run_creation_audit(
     task_instruction_path: Path | None = None,
     environment_initial_state: dict[str, Any] | None = None,
     environment_initial_state_path: Path | None = None,
+    reference_root: Path | None = None,
+    environment_dir: Path | None = None,
 ) -> int:
     if platform not in SUPPORTED_PLATFORMS:
         raise ValueError(
             f"--platform must be one of {SUPPORTED_PLATFORMS}, got {platform!r}"
         )
+    workspace = workspace.expanduser().resolve()
+    explicit_path_layout = reference_root is not None or environment_dir is not None
+    resolved_reference_root = (
+        reference_root.expanduser().resolve()
+        if reference_root is not None
+        else workspace
+    )
+    resolved_environment_dir = (
+        environment_dir.expanduser().resolve()
+        if environment_dir is not None
+        else workspace / _benchmark_root(platform) / "environments" / env_dir
+    )
+    if explicit_path_layout and not (
+        resolved_reference_root / "src" / "gym_anything"
+    ).is_dir():
+        raise ValueError(
+            "reference_root must be a Gym-Anything repository containing "
+            f"src/gym_anything: {resolved_reference_root}"
+        )
+    workspace.mkdir(parents=True, exist_ok=True)
+    resolved_environment_dir.parent.mkdir(parents=True, exist_ok=True)
     audits_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
+
+    prompt_paths = {
+        "reference_root": resolved_reference_root if explicit_path_layout else None,
+        "workspace": workspace if explicit_path_layout else None,
+        "environment_dir": resolved_environment_dir if explicit_path_layout else None,
+    }
 
     if backend == "cc":
         binary = _resolve_bin(claude_bin, "CLAUDE_BIN", "claude")
@@ -624,13 +744,22 @@ def run_creation_audit(
         raise ValueError(f"Unknown backend: {backend!r}; expected 'cc' or 'codex'")
 
     log_path = logs_dir / f"{env_dir}.txt"
+    if explicit_path_layout:
+        target_description = resolved_environment_dir.as_posix()
+        path_log = f"Gym Reference Root: {resolved_reference_root}\n"
+    else:
+        target_description = (
+            f"{env_dir} (under {_benchmark_root(platform)}/environments/)"
+        )
+        path_log = ""
     log_text = (
         f"Session ID: {session_id}\n"
         f"Backend: {backend}\n"
         f"Platform: {platform}\n"
         f"Target Application: {software}\n"
-        f"Target Env Directory: {env_dir} (under {_benchmark_root(platform)}/environments/)\n"
+        f"Target Env Directory: {target_description}\n"
         f"Workspace: {workspace}\n"
+        f"{path_log}"
         f"Audits Dir: {audits_dir}\n"
         f"Start Index: {start_idx}\n"
         f"Blind Nudges: {blind_nudges}\n"
@@ -686,6 +815,7 @@ def run_creation_audit(
                 environment_spec,
                 task_instruction,
                 environment_initial_state,
+                **prompt_paths,
             ),
             # Codex cannot accept a caller-selected session id for a fresh exec.
             # Its session was bootstrapped above, so keep the actual creation
@@ -712,6 +842,7 @@ def run_creation_audit(
                 task_instruction,
                 environment_initial_state,
                 software,
+                **prompt_paths,
             ),
             resume=True,
         )
@@ -730,7 +861,7 @@ def run_creation_audit(
             audit_session = str(uuid.uuid4())
             _claude_invoke(
                 binary,
-                _audit_explore_prompt(),
+                _audit_explore_prompt(**prompt_paths),
                 session_id=audit_session,
                 resume=False,
                 workspace=workspace,
@@ -747,6 +878,7 @@ def run_creation_audit(
                     task_instruction,
                     environment_initial_state,
                     software,
+                    **prompt_paths,
                 ),
                 session_id=audit_session,
                 resume=True,
@@ -757,7 +889,7 @@ def run_creation_audit(
             audit_session = _codex_new_session(binary, workspace)
             _codex_invoke(
                 binary,
-                _audit_explore_prompt(),
+                _audit_explore_prompt(**prompt_paths),
                 session_id=audit_session,
                 resume=True,
                 workspace=workspace,
@@ -774,6 +906,7 @@ def run_creation_audit(
                     task_instruction,
                     environment_initial_state,
                     software,
+                    **prompt_paths,
                 ),
                 session_id=audit_session,
                 resume=True,
@@ -796,6 +929,7 @@ def run_creation_audit(
                 task_instruction,
                 environment_initial_state,
                 software,
+                **prompt_paths,
             ),
             resume=True,
         )
@@ -910,6 +1044,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path the agent operates from; defaults to the gym-anything repo root",
     )
     parser.add_argument(
+        "--reference-root",
+        type=Path,
+        default=None,
+        help="Read-only Gym-Anything repository used to resolve reference paths",
+    )
+    parser.add_argument(
+        "--environment-dir",
+        type=Path,
+        default=None,
+        help="Exact directory where the generated environment must be written",
+    )
+    parser.add_argument(
         "--memory-dir",
         type=Path,
         default=None,
@@ -972,6 +1118,16 @@ def run(argv: list[str] | None = None) -> int:
     memory_dir = (args.memory_dir or _packaged_memory_dir()).resolve()
     audits_dir = (args.audits_dir or workspace / "audits").resolve()
     logs_dir = (args.logs_dir or workspace / "creation_audit_logs").resolve()
+    reference_root = (
+        args.reference_root.expanduser().resolve()
+        if args.reference_root is not None
+        else None
+    )
+    environment_dir = (
+        args.environment_dir.expanduser().resolve()
+        if args.environment_dir is not None
+        else None
+    )
 
     return run_creation_audit(
         software=software,
@@ -995,6 +1151,8 @@ def run(argv: list[str] | None = None) -> int:
         task_instruction_path=task_instruction_path,
         environment_initial_state=environment_initial_state,
         environment_initial_state_path=environment_initial_state_path,
+        reference_root=reference_root,
+        environment_dir=environment_dir,
     )
 
 

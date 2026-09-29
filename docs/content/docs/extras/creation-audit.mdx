@@ -76,6 +76,28 @@ prompts. The software name may still be derived from
 names must match. All context flags are optional, so the original command and
 task-generation behavior remain unchanged when they are omitted.
 
+### External workspace and environment output
+
+Callers that treat the Gym repository as reference material can separate it
+from the agent's writable workspace and generated environment:
+
+```bash
+gym-anything-extras research software_as_env creation_audit \
+    --software "GitLab" \
+    --env-dir gitlab_task_env \
+    --reference-root /path/to/gym-anything \
+    --workspace /path/to/output/creation_audit/workspace \
+    --environment-dir /path/to/output/environment \
+    --audits-dir /path/to/output/creation_audit/audits \
+    --logs-dir /path/to/output/creation_audit/logs
+```
+
+With these arguments, repository-relative references are resolved under
+`--reference-root`, agent processes run from `--workspace`, and the generated
+environment is written to the exact `--environment-dir`. The reference root is
+treated as read-only. Omitting the new path arguments preserves the original
+behavior and writes the environment under the selected benchmark tree.
+
 What happens after you press enter:
 
 1. **Initial pass** — the creation agent reads the creation prompt
@@ -110,7 +132,8 @@ Run `... creation_audit --help` for the full flag list.
 
 ## Output
 
-- `benchmarks/cua_world/environments/<env_dir>/` — the new
+- `<environment-dir>/`, when `--environment-dir` is supplied, or
+  `benchmarks/cua_world/environments/<env_dir>/` by default — the new
   environment. Contains `env.json`, `scripts/`, `config/`, `tasks/`,
   `evidence_docs/`. Conforms to the gym-anything `EnvSpec` / `TaskSpec`
   contract.

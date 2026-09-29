@@ -250,6 +250,27 @@ class ParserTests(unittest.TestCase):
         self.assertIsNone(args.task_instruction)
         self.assertIsNone(args.task_instruction_file)
         self.assertIsNone(args.environment_initial_state)
+        self.assertIsNone(args.reference_root)
+        self.assertIsNone(args.environment_dir)
+
+    def test_explicit_path_layout_arguments_parse(self):
+        args = ca.build_parser().parse_args(
+            [
+                "--software",
+                "Demo",
+                "--env-dir",
+                "demo_env",
+                "--workspace",
+                "/tmp/workspace",
+                "--reference-root",
+                "/tmp/gym-anything",
+                "--environment-dir",
+                "/tmp/output/environment",
+            ]
+        )
+        self.assertEqual(args.workspace, Path("/tmp/workspace"))
+        self.assertEqual(args.reference_root, Path("/tmp/gym-anything"))
+        self.assertEqual(args.environment_dir, Path("/tmp/output/environment"))
 
     def test_environment_spec_allows_software_to_be_omitted_at_parse_time(self):
         args = ca.build_parser().parse_args(
@@ -339,6 +360,33 @@ class CliWiringTests(unittest.TestCase):
         self.assertIsNone(kwargs["task_instruction_path"])
         self.assertIsNone(kwargs["environment_initial_state"])
         self.assertIsNone(kwargs["environment_initial_state_path"])
+        self.assertIsNone(kwargs["reference_root"])
+        self.assertIsNone(kwargs["environment_dir"])
+
+    def test_run_passes_explicit_path_layout(self):
+        with mock.patch.object(ca, "run_creation_audit", return_value=0) as run_loop:
+            result = ca.run(
+                [
+                    "--software",
+                    "Demo",
+                    "--env-dir",
+                    "demo_env",
+                    "--workspace",
+                    "/tmp/workspace",
+                    "--reference-root",
+                    str(REPO_ROOT),
+                    "--environment-dir",
+                    "/tmp/output/environment",
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        kwargs = run_loop.call_args.kwargs
+        self.assertEqual(kwargs["workspace"], Path("/tmp/workspace"))
+        self.assertEqual(kwargs["reference_root"], REPO_ROOT.resolve())
+        self.assertEqual(
+            kwargs["environment_dir"], Path("/tmp/output/environment")
+        )
 
     def test_run_derives_software_and_passes_loaded_environment_spec(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -604,6 +652,50 @@ class CodexSessionTests(unittest.TestCase):
         self.assertIn(f"Environment Initial State Source: {state_source}", log_text)
 
 
+    def test_pipeline_separates_reference_workspace_and_environment_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "creation_audit" / "workspace"
+            environment_dir = root / "environment"
+            with (
+                mock.patch.object(ca, "_resolve_bin", return_value=Path("/tmp/codex")),
+                mock.patch.object(ca, "_codex_invoke") as invoke,
+            ):
+                result = ca.run_creation_audit(
+                    software="GitLab",
+                    env_dir="gitlab_env",
+                    backend="codex",
+                    platform="linux",
+                    blind_nudges=0,
+                    audit_rounds=0,
+                    start_idx=0,
+                    session_id="creator-session",
+                    workspace=workspace,
+                    reference_root=REPO_ROOT,
+                    environment_dir=environment_dir,
+                    memory_dir=ca._packaged_memory_dir(),
+                    audits_dir=root / "audits",
+                    logs_dir=root / "logs",
+                    claude_bin=None,
+                    codex_bin=None,
+                    timeout_sec=60,
+                )
+                prompt = invoke.call_args.args[1]
+                log_text = (root / "logs" / "gitlab_env.txt").read_text(
+                    encoding="utf-8"
+                )
+            workspace_created = workspace.is_dir()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(workspace_created)
+        self.assertEqual(invoke.call_args.kwargs["workspace"], workspace)
+        self.assertIn(f"Gym reference repository (read-only): @{REPO_ROOT}", prompt)
+        self.assertIn(f"Writable agent workspace: @{workspace}", prompt)
+        self.assertIn(f"Target environment directory: @{environment_dir}", prompt)
+        self.assertIn(f"Gym Reference Root: {REPO_ROOT}", log_text)
+        self.assertIn(f"Target Env Directory: {environment_dir}", log_text)
+
+
 class PromptAssemblyTests(unittest.TestCase):
     """Prompts must reference files at their real on-disk path, not at the
     workspace root."""
@@ -623,6 +715,35 @@ class PromptAssemblyTests(unittest.TestCase):
             text = ca._audit_run_prompt("demo_env", audits, prompts)
         self.assertIn(f"@{(prompts / 'audit_prompt.md').as_posix()}", text)
         self.assertIn("demo_env", text)
+
+    def test_explicit_path_layout_overrides_benchmark_relative_destination(self):
+        prompts = ca._packaged_memory_dir()
+        reference_root = REPO_ROOT.resolve()
+        workspace = Path("/tmp/aab-output/creation_audit/workspace")
+        environment_dir = Path("/tmp/aab-output/environment")
+        kwargs = {
+            "reference_root": reference_root,
+            "workspace": workspace,
+            "environment_dir": environment_dir,
+        }
+
+        creation = ca._initial_prompt("Demo", "demo_env", prompts, **kwargs)
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = ca._audit_run_prompt(
+                "demo_env", Path(tmp), prompts, **kwargs
+            )
+
+        for prompt in (creation, audit):
+            self.assertIn(
+                f"Gym reference repository (read-only): @{reference_root}", prompt
+            )
+            self.assertIn(f"Writable agent workspace: @{workspace}", prompt)
+            self.assertIn(
+                f"Target environment directory: @{environment_dir}", prompt
+            )
+            self.assertIn("Do not modify or create files inside", prompt)
+        self.assertIn(f"target env directory is @{environment_dir}", audit)
+        self.assertNotIn("@benchmarks/cua_world/environments/demo_env", audit)
 
     def test_nudge_prompt_uses_real_creation_path(self):
         prompts = ca._packaged_memory_dir()
