@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import signal
 import tempfile
 import unittest
@@ -21,6 +22,16 @@ class QemuDbusFastIoTests(unittest.TestCase):
         runner._fast_input_guest_port = 5599
         runner._fast_input_device_name = "GymAnything Fast Keyboard"
         return runner
+
+    def test_task_init_raises_on_nonzero_exit(self) -> None:
+        runner = self._runner()
+        runner.is_windows = False
+        runner.exec = mock.Mock(return_value=9)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "Task init script exited with status 9"
+        ):
+            runner.run_task_init("false")
 
     def test_set_fast_io_prepares_dbus_container_only_for_dbus_backend(self) -> None:
         runner = QemuApptainerRunner.__new__(QemuApptainerRunner)

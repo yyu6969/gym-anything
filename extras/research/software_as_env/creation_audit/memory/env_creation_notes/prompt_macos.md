@@ -6,6 +6,27 @@ like the Linux envs). This prompt is shorter than the Linux one (`prompt.md`)
 because it defers to a single comprehensive reference and two working
 example envs you should mirror.
 
+## Optional AAB context
+
+The invocation prompt may include an explicit `## Input` block. When present,
+treat each labeled value according to its own contract:
+
+- **Software** identifies the application being reconstructed.
+- **Environment Specification** defines the stable shared world. Use it for
+  application configuration, persistent entities and data, relationships,
+  permissions, and required capabilities.
+- **Environment Initial State** defines per-task state. Implement
+  `task_preconditions` in the task's existing `pre_task` setup/reset hook,
+  and use `episode_start` to prepare the initial application, page,
+  authenticated session, and visible UI.
+- **Task Instruction** is the exact benchmark task. Preserve its wording and
+  intent in the generated `task.json` description and support it rather than
+  inventing an unrelated task.
+
+Never turn mutable task preconditions into permanent environment configuration,
+and never merge the three AAB artifacts into undifferentiated context. If no AAB
+context is supplied, follow the legacy task-generation workflow unchanged.
+
 ---
 
 ## Phase 0: REQUIRED reading order (do this FIRST)

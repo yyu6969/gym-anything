@@ -37,6 +37,42 @@ gym-anything-extras research software_as_env creation_audit \
     --software "Moodle" --env-dir moodle_env
 ```
 
+## AAB task and environment context
+
+A creation-audit run can consume AAB's task instruction, stable environment
+specification, and per-episode initial state:
+
+```bash
+gym-anything-extras research software_as_env creation_audit \
+    --software "GitLab" \
+    --env-dir gitlab_task_env \
+    --task-instruction "Add an MIT license to the 'Byte Blaze / dotfiles' repository." \
+    --environment-spec /path/to/environment_spec.json \
+    --environment-initial-state /path/to/environment_initial_state.json
+```
+
+Use `--task-instruction-file /path/to/step4_candidate_selection.json` instead
+of `--task-instruction` to read AAB's canonical
+`output.selected_instruction`; the two forms are mutually exclusive.
+
+The JSON loaders intentionally validate only the AAB boundary:
+`--environment-spec` requires a top-level `environment_spec` object, and
+`--environment-initial-state` requires a top-level
+`environment_initial_state` object. Creation-audit keeps their roles separate:
+
+- Environment Specification guides shared construction, configuration,
+  persistent data, permissions, relationships, and capabilities.
+- Environment Initial State guides the existing task `pre_task` setup/reset
+  hook and starting page/session/UI state.
+- Task Instruction is preserved as the generated benchmark task description.
+
+The normalized values and source paths are preserved in
+`creation_audit_logs/<env_dir>.txt` and included in creator and auditor
+prompts. The software name may still be derived from
+`environment_spec.software.name`; if `--software` is also supplied, the
+names must match. All context flags are optional, so the original command and
+task-generation behavior remain unchanged when they are omitted.
+
 What happens after you press enter:
 
 1. **Initial pass** — the creation agent reads the creation prompt and

@@ -1,5 +1,20 @@
 awesome now consider @benchmarks/cua_world-macos/environments/{target_env_dir}/ the agent completed it. but we have to verify the quality of the environment. Note: this is a **macOS** env built on the UseComputerRunner + use.computer fleet — see @extras/research/software_as_env/creation_audit/memory/env_creation_notes/12_macos_environments.md for the platform-specific constraints (workspace path /Users/lume/workspace, no DISPLAY/xdotool, pre_task launches the app, Enter ≠ Return, Safari is sandboxed, etc.).
 
+If the invocation includes an AAB `## Input` block, audit its labeled inputs
+separately in addition to the checklist below:
+
+- Verify **Environment Specification** as stable shared environment
+  construction/configuration/data, permissions, relationships, and capabilities.
+- Verify **Environment Initial State** through the task's setup/reset behavior:
+  `task_preconditions` must hold before the agent starts, and `episode_start`
+  must match the initial application, page, identity/session, and visible UI.
+  Confirm transient preconditions were not baked into permanent configuration.
+- Verify the generated task presents the **Task Instruction** without silently
+  rewriting its intent and that the environment actually supports that task.
+
+Report evidence and failures for these three responsibilities separately. Do not
+accept the creation agent's comments or claims as proof.
+
 Consider the following checklist items:
 Checklist for task/env checks:
     a.) Is task description sufficiently detail, such that agent can complete the task correctly? Is task descritpion not over detailed, with information the agent is expecteed to know (eg, what features to use). Is task description ambiguous, such that agent can use 2 differnt or more approaches, but would be awared points only for 1 of them, despite both being correct? 

@@ -2,6 +2,27 @@
 
 This document provides a step-by-step workflow for creating new environments in the gym_anything framework. Follow these phases in order.
 
+## Optional AAB context
+
+The invocation prompt may include an explicit `## Input` block. When present,
+treat each labeled value according to its own contract:
+
+- **Software** identifies the application being reconstructed.
+- **Environment Specification** defines the stable shared world. Use it for
+  application configuration, persistent entities and data, relationships,
+  permissions, and required capabilities.
+- **Environment Initial State** defines per-task state. Implement
+  `task_preconditions` in the task's existing `pre_task` setup/reset hook,
+  and use `episode_start` to prepare the initial application, page,
+  authenticated session, and visible UI.
+- **Task Instruction** is the exact benchmark task. Preserve its wording and
+  intent in the generated `task.json` description and support it rather than
+  inventing an unrelated task.
+
+Never turn mutable task preconditions into permanent environment configuration,
+and never merge the three AAB artifacts into undifferentiated context. If no AAB
+context is supplied, follow the legacy task-generation workflow unchanged.
+
 ---
 
 ## Phase 1: Understand the Framework

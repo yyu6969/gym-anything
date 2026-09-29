@@ -28,6 +28,8 @@ class _FakeRunner:
         self.injected_actions = []
         self.fast_io = False
         self.image_capture_calls = 0
+        self.hook_statuses = {}
+        self.copied_from = []
 
     def start(self, seed=None) -> None:
         self.start_calls += 1
@@ -52,6 +54,8 @@ class _FakeRunner:
         return "linux"
 
     def run_hook(self, command, *, stage, timeout=None, use_pty=True):
+        if stage in self.hook_statuses:
+            return self.hook_statuses[stage]
         from gym_anything.runtime.runners.base import BaseRunner
 
         return BaseRunner.run_hook(self, command, stage=stage, timeout=timeout, use_pty=use_pty)
@@ -99,7 +103,8 @@ class _FakeRunner:
         return None
 
     def copy_from(self, container_src: str, host_dst: str) -> None:
-        return None
+        self.copied_from.append((container_src, host_dst))
+        Path(host_dst).write_text(f"copied from {container_src}\n")
 
     def put_file(self, host_path) -> str:
         return str(host_path)
@@ -135,12 +140,19 @@ class _FastFakeRunner(_FakeRunner):
         return True
 
 
-def _make_env_spec(output_dir: str, *, runner: str | None = None, recording: bool = False) -> EnvSpec:
+def _make_env_spec(
+    output_dir: str,
+    *,
+    runner: str | None = None,
+    recording: bool = False,
+    diagnostics: bool = False,
+) -> EnvSpec:
     data = {
         "id": "demo-env",
         "observation": [{"type": "rgb_screen", "fps": 1, "resolution": [64, 64]}],
         "action": [{"type": "mouse"}],
         "recording": {"enable": recording, "output_dir": output_dir, "video_fps": 4},
+        "diagnostics": diagnostics,
     }
     if runner is not None:
         data["runner"] = runner
@@ -148,6 +160,61 @@ def _make_env_spec(output_dir: str, *, runner: str | None = None, recording: boo
 
 
 class RuntimeBehaviorTests(unittest.TestCase):
+    def test_reset_fails_closed_when_required_hook_returns_nonzero(self) -> None:
+        for stage in ("pre_start", "post_start", "pre_task"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as tmp:
+                runner = _FakeRunner()
+                runner.hook_statuses[stage] = 17
+                env_spec = _make_env_spec(tmp)
+                task_spec = None
+                if stage == "pre_task":
+                    task_spec = TaskSpec.from_dict(
+                        {"id": "demo-task", "hooks": {"pre_task": "false"}}
+                    )
+                else:
+                    env_spec.hooks[stage] = "false"
+
+                with mock.patch.object(
+                    GymAnythingEnv, "_select_runner", return_value=runner
+                ):
+                    env = GymAnythingEnv(env_spec, task_spec)
+                try:
+                    with self.assertRaisesRegex(
+                        RuntimeError, rf"{stage} hook exited with status 17"
+                    ):
+                        env.reset(seed=1)
+                    self.assertIsNone(env.get_session_info())
+                    self.assertEqual(runner.stop_calls, 1)
+                finally:
+                    env.close()
+
+    def test_failed_reset_preserves_diagnostics_before_stopping_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = _FakeRunner()
+            runner.hook_statuses["post_start"] = 17
+            env_spec = _make_env_spec(tmp, diagnostics=True)
+            env_spec.hooks["post_start"] = "false"
+
+            with mock.patch.object(
+                GymAnythingEnv, "_select_runner", return_value=runner
+            ):
+                env = GymAnythingEnv(env_spec, None)
+            try:
+                with self.assertRaisesRegex(
+                    RuntimeError, "post_start hook exited with status 17"
+                ):
+                    env.reset(seed=1)
+
+                episode_dirs = list(Path(tmp).glob("episode_*"))
+                self.assertEqual(len(episode_dirs), 1)
+                self.assertTrue((episode_dirs[0] / "reset_failure.png").is_file())
+                copied_sources = {source for source, _ in runner.copied_from}
+                self.assertIn("/tmp/firefox_gitlab.log", copied_sources)
+                self.assertIn("/home/ga/env_setup_post_start.log", copied_sources)
+                self.assertEqual(runner.stop_calls, 1)
+            finally:
+                env.close()
+
     def test_step_handles_wait_control_action_inside_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runner = _FakeRunner()
