@@ -46,7 +46,7 @@ specification, and per-episode initial state:
 gym-anything-extras research software_as_env creation_audit \
     --software "GitLab" \
     --env-dir gitlab_task_env \
-    --task-instruction "Add an MIT license to the 'Byte Blaze / dotfiles' repository." \
+    --task-instruction "Enable issue tracking in the 'Acme Labs / sample' project." \
     --environment-spec /path/to/environment_spec.json \
     --environment-initial-state /path/to/environment_initial_state.json
 ```

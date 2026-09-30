@@ -22,35 +22,35 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from extras.research.software_as_env.creation_audit import method as ca
 
-TASK_INSTRUCTION = "Add an MIT license to the 'Byte Blaze / dotfiles' repository."
+TASK_INSTRUCTION = "Enable issue tracking in the 'Acme Labs / sample' project."
 
 VALID_ENVIRONMENT_SPEC = {
     "software": {"name": "GitLab", "version": None},
     "entities": [
         {
-            "id": "project_dotfiles",
+            "id": "project_sample",
             "type": "project",
-            "attributes": {"path_with_namespace": "byteblaze/dotfiles"},
+            "attributes": {"path_with_namespace": "acme-labs/sample"},
         }
     ],
     "properties": [
         {
-            "entity_ref": "project_dotfiles",
+            "entity_ref": "project_sample",
             "property": "default_branch",
             "value": "main",
         }
     ],
     "relationships": [
         {
-            "subject_ref": "user_byte_blaze",
+            "subject_ref": "user_maintainer",
             "relationship": "can_write",
-            "object_ref": "project_dotfiles",
+            "object_ref": "project_sample",
         }
     ],
     "capabilities": [
         {
-            "name": "apply_license_template",
-            "entity_refs": ["project_dotfiles"],
+            "name": "manage_project_settings",
+            "entity_refs": ["project_sample"],
         }
     ],
     "environment_settings": [],
@@ -65,13 +65,13 @@ VALID_ENVIRONMENT_INITIAL_STATE = {
         "application": "GitLab",
         "page_type": "projects_dashboard",
         "authenticated": True,
-        "authenticated_entity_ref": "user_byte_blaze",
+        "authenticated_entity_ref": "user_maintainer",
     },
     "task_preconditions": [
         {
-            "id": "has_license",
-            "entity_ref": "project_dotfiles",
-            "attribute": "has_license",
+            "id": "issue_tracking_disabled",
+            "entity_ref": "project_sample",
+            "attribute": "issue_tracking_enabled",
             "value": False,
         }
     ],
@@ -852,8 +852,8 @@ class PromptAssemblyTests(unittest.TestCase):
         self.assertIn("Audit each supplied input", audit)
         self.assertIn("task_preconditions", creation)
         self.assertIn("episode_start", creation)
-        self.assertIn("has_license", creation)
-        self.assertIn("apply_license_template", creation)
+        self.assertIn("issue_tracking_enabled", creation)
+        self.assertIn("manage_project_settings", creation)
 
     def test_iterative_prompts_restate_all_aab_inputs(self):
         prompts = ca._packaged_memory_dir()
