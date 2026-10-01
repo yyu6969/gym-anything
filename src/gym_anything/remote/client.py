@@ -407,6 +407,7 @@ class RemoteGymEnv:
         *,
         capture_observation: bool = True,
         settle_after_actions: bool = True,
+        trajectory_metadata: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
         """Execute actions in the environment.
         
@@ -420,16 +421,19 @@ class RemoteGymEnv:
         Returns:
             Tuple of (observation, reward, done, info)
         """
+        payload = {
+            "actions": actions,
+            "wait_between_actions": wait_between_actions,
+            "mark_done": mark_done,
+            "capture_observation": capture_observation,
+            "settle_after_actions": settle_after_actions,
+        }
+        if trajectory_metadata is not None:
+            payload["trajectory_metadata"] = trajectory_metadata
         response = self._request(
             "POST",
             f"/envs/{self.env_id}/step",
-            json={
-                "actions": actions,
-                "wait_between_actions": wait_between_actions,
-                "mark_done": mark_done,
-                "capture_observation": capture_observation,
-                "settle_after_actions": settle_after_actions,
-            }
+            json=payload,
         )
         
         result = response.json()
@@ -439,6 +443,14 @@ class RemoteGymEnv:
         info = result["info"]
         
         return obs, reward, done, info
+
+    def log_trajectory_event(self, event: Dict[str, Any]) -> None:
+        """Append a runner-owned event to the remote episode trajectory."""
+        self._request(
+            "POST",
+            f"/envs/{self.env_id}/trajectory_event",
+            json={"event": event},
+        )
     
     def close(self) -> None:
         """Close the environment and cleanup resources."""

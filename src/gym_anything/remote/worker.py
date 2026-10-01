@@ -1002,6 +1002,7 @@ def step_environment(env_id: str):
         mark_done = data.get("mark_done", False)
         capture_observation = data.get("capture_observation", True)
         settle_after_actions = data.get("settle_after_actions", True)
+        trajectory_metadata = data.get("trajectory_metadata")
 
         obs, reward, done, info = env.step(
             actions=actions,
@@ -1009,6 +1010,7 @@ def step_environment(env_id: str):
             mark_done=mark_done,
             capture_observation=capture_observation,
             settle_after_actions=settle_after_actions,
+            trajectory_metadata=trajectory_metadata,
         )
 
         if metrics_collector:
@@ -1033,6 +1035,22 @@ def step_environment(env_id: str):
     except Exception as e:
         logger.error(f"Error stepping environment {env_id}: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/envs/<env_id>/trajectory_event', methods=['POST'])
+@track_endpoint
+def log_trajectory_event(env_id: str):
+    """Append a controller-owned event without advancing the environment."""
+    try:
+        env = env_manager.get_environment(env_id)
+        data = request.get_json() or {}
+        env.log_trajectory_event(data.get("event"))
+        return jsonify({"status": "recorded"})
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        logger.error(f"[{env_id}] Failed to log trajectory event: {exc}", exc_info=True)
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.route('/envs/<env_id>/close', methods=['POST'])

@@ -30,6 +30,22 @@ class Gemini3Agent(ClaudeAgent):
         super().__init__(*args, **kwargs)
         self.system_prompt = GEMINI_SYSTEM_PROMPT_SINGLE_STEP
         self.system_prompt = self.system_prompt.replace('<<TOOL_DEFINITIONS>>', json.dumps(TOOL_DEFINITIONS))
+        self.execution_context = None
+
+    def set_execution_context(self, context):
+        """Set temporary runner-owned guidance for the next policy turns."""
+        self.execution_context = context
+
+    def _observation_content(self, processed_image_b64):
+        content = [{
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/png;base64,{processed_image_b64}"
+            }
+        }]
+        if self.execution_context is not None:
+            content.insert(0, {"type": "text", "text": self.execution_context})
+        return content
 
     def process_image(self, image_path, resize_to = None):
         """
@@ -74,12 +90,8 @@ class Gemini3Agent(ClaudeAgent):
         processed_image_b64 = self.process_image(obs['screen']['path'], resize_to = (1920, 1080))
         
         # Build messages
-        self.messages.append({"content": [{
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/png;base64,{processed_image_b64}"
-            }
-        }], "role": "user"})
+        observation_content = self._observation_content(processed_image_b64)
+        self.messages.append({"content": observation_content, "role": "user"})
 
         self.messages[-1]['cache_control'] = {"type": "ephemeral"}
 

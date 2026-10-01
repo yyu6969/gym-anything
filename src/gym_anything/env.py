@@ -516,6 +516,7 @@ class GymAnythingEnv:
         *,
         capture_observation: bool = True,
         settle_after_actions: bool = True,
+        trajectory_metadata: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
         """Apply actions and optionally defer settling and observation capture.
 
@@ -523,6 +524,14 @@ class GymAnythingEnv:
         flags to ``False``, then capture their own observation window. Existing
         callers retain the original settle-and-capture behavior.
         """
+        if trajectory_metadata is not None:
+            if not isinstance(trajectory_metadata, dict):
+                raise TypeError("trajectory_metadata must be a dictionary")
+            reserved_fields = {"event", "ts", "idx", "action"}.intersection(trajectory_metadata)
+            if reserved_fields:
+                fields = ", ".join(sorted(reserved_fields))
+                raise ValueError(f"trajectory_metadata cannot override reserved fields: {fields}")
+
         # Multi-agent: accept mapping role->action, else annotate turn-based role
         if isinstance(actions, dict):
             actions = [actions]
@@ -577,12 +586,15 @@ class GymAnythingEnv:
 
         # Log step
         if self._traj_log:
-            self._traj_log.write({
+            step_event = {
                 "event": "step",
                 "ts": time.time(),
                 "idx": self._step_idx,
                 "action": actions,
-            })
+            }
+            if trajectory_metadata:
+                step_event.update(trajectory_metadata)
+            self._traj_log.write(step_event)
 
         reward = 0.0
         done = False
@@ -631,6 +643,20 @@ class GymAnythingEnv:
             reward = self._final_reward(summary, current_reward=reward)
         self._step_idx += 1
         return obs, reward, done, info
+
+    def log_trajectory_event(self, event: Dict[str, Any]) -> None:
+        """Append a runner-owned event without advancing the environment."""
+        if not isinstance(event, dict) or not isinstance(event.get("event"), str):
+            raise ValueError('trajectory event must be a dictionary with string field "event"')
+        if self._traj_log:
+            self._traj_log.write(event)
+            return
+        if self._episode_dir:
+            writer = JSONLWriter(self._episode_dir / "traj.jsonl")
+            try:
+                writer.write(event)
+            finally:
+                writer.close()
 
     def _post_action_settle_seconds(self) -> float:
         if not self.fast_io:

@@ -47,6 +47,15 @@ Common optional arguments are:
 - `--timing-jsonl`: write per-iteration timing records to a chosen JSONL path;
   by default single-task runs write `timing.jsonl` and `timing_summary.json`
   under the episode directory
+- `--semantic_traj_apply PATH`: for `Gemini3Agent`, execute a validated semantic
+  trajectory in strict order while leaving low-level GUI actions to the agent
+
+When `--semantic_traj_apply` is present, the runner exposes only the current
+semantic instruction and expected state to the agent. A Gemini-based visual
+check advances the controller only after that state is visible. Semantic step
+events are added to `traj.jsonl`, and completing the trajectory still flows
+through the task's normal `mark_done` verifier. Without the option, the agent
+prompt, execution loop, logging, and verification behavior are unchanged.
 
 ## What `run_single` Does
 

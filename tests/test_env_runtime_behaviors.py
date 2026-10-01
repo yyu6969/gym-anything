@@ -255,6 +255,42 @@ class RuntimeBehaviorTests(unittest.TestCase):
             finally:
                 env.close()
 
+    def test_step_can_add_optional_trajectory_metadata_and_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = _FakeRunner()
+            with mock.patch.object(GymAnythingEnv, "_select_runner", return_value=runner):
+                env = GymAnythingEnv(_make_env_spec(tmp), None)
+
+            try:
+                env.reset(seed=1)
+                env.step(
+                    [{"action": "screenshot"}],
+                    trajectory_metadata={
+                        "semantic_step_id": 2,
+                        "semantic_instruction": "Open the editor.",
+                    },
+                )
+                env.log_trajectory_event(
+                    {
+                        "event": "semantic_step_complete",
+                        "semantic_step_id": 2,
+                        "reason": "The editor is visible.",
+                    }
+                )
+
+                records = [
+                    json.loads(line)
+                    for line in (Path(env.episode_dir) / "traj.jsonl").read_text().splitlines()
+                ]
+                step = next(record for record in records if record["event"] == "step")
+                self.assertEqual(step["semantic_step_id"], 2)
+                self.assertEqual(step["semantic_instruction"], "Open the editor.")
+                self.assertTrue(
+                    any(record["event"] == "semantic_step_complete" for record in records)
+                )
+            finally:
+                env.close()
+
     def test_fast_io_requires_runner_support(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runner = _FakeRunner()

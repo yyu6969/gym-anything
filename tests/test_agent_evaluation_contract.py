@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from agents.evaluation import run_single as run_single_module
+from agents.evaluation.semantic_trajectory import SemanticStepCompletion
 
 
 class _FakePolicy:
@@ -49,6 +50,9 @@ class _FakeEnv:
         self.step_calls = []
         self.capture_calls = 0
         self.closed = False
+        self.trajectory_metadata = []
+        self.trajectory_events = []
+        self.verifier_passed = True
 
     def reset(self, **kwargs):
         self.reset_kwargs = kwargs
@@ -58,10 +62,16 @@ class _FakeEnv:
         self.capture_calls += 1
         return {"screen": {"path": f"capture_{self.capture_calls}.png"}}
 
-    def step(self, actions, mark_done=False, **kwargs):
+    def step(self, actions, mark_done=False, trajectory_metadata=None, **kwargs):
         self.step_calls.append((actions, mark_done))
+        self.trajectory_metadata.append(trajectory_metadata)
         if mark_done:
-            return {"screen": {"path": "final.png"}}, 1.0, True, {"verifier": {"passed": True, "score": 100}}
+            score = 100 if self.verifier_passed else 0
+            return {
+                "screen": {"path": "final.png"}
+            }, float(self.verifier_passed), True, {
+                "verifier": {"passed": self.verifier_passed, "score": score}
+            }
         return {
             "screen": {"path": "synthetic.png"}
         }, 0.0, False, {
@@ -74,6 +84,9 @@ class _FakeEnv:
     def set_episode_limits(self, *, max_steps=None, timeout_sec=None):
         if max_steps is not None:
             self.max_steps = max_steps
+
+    def log_trajectory_event(self, event):
+        self.trajectory_events.append(event)
 
     def close(self):
         self.closed = True
@@ -325,6 +338,151 @@ class AgentEvaluationContractTests(unittest.TestCase):
             self.assertEqual(fake_env.step_calls, [([], True)])
             self.assertEqual(agent.finish_info["verifier"]["score"], 100)
             self.assertTrue(fake_env.closed)
+
+    def test_semantic_completion_still_uses_the_existing_verifier(self) -> None:
+        class _FakeSemanticPolicy(_FakePolicy):
+            def set_execution_context(self, context):
+                self.execution_context = context
+
+            def step(self, obs, action_outputs):
+                self.step_calls.append((obs, list(action_outputs)))
+                return [{"tool_id": "tool-1", "actions": [{"action": "screenshot"}]}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            trajectory_path = Path(tmp) / "semantic.json"
+            trajectory_path.write_text(
+                json.dumps({"steps": [{"step_id": 1, "instruction": "Open the project."}]}),
+                encoding="utf-8",
+            )
+            fake_env = _FakeEnv(Path(tmp))
+            fake_env.verifier_passed = False
+            args = SimpleNamespace(
+                env_dir="demo-env",
+                seed=42,
+                task="demo-task",
+                steps=2,
+                agent="FakeSemanticPolicy",
+                agent_args=json.dumps({"model": "gemini-demo"}),
+                semantic_trajectory_path=str(trajectory_path),
+                debug=False,
+                debug_low=False,
+                verbose=False,
+                setup_code="none",
+                use_cache=False,
+                cache_level="pre_start",
+                use_savevm=False,
+                vlm_backend="local",
+                vlm_base_url="http://localhost:8080/v1",
+                vlm_model="gemini-demo",
+                remote_url=None,
+                remote_timeout=300,
+                remote_worker_reset_policy="core",
+            )
+            checker = mock.Mock()
+            checker.check.return_value = SemanticStepCompletion(
+                completed=True,
+                reason="The project is visible.",
+            )
+
+            with mock.patch.object(run_single_module, "from_config", return_value=fake_env), \
+                 mock.patch.object(
+                     run_single_module.agent_registry,
+                     "FakeSemanticPolicy",
+                     _FakeSemanticPolicy,
+                     create=True,
+                 ), \
+                 mock.patch.object(
+                     run_single_module,
+                     "SemanticStepCompletionChecker",
+                     return_value=checker,
+                 ):
+                _FakeSemanticPolicy.instances.clear()
+                result = run_single_module.run_single(args)
+
+            self.assertEqual(result, 0)
+            self.assertEqual(fake_env.step_calls[0], ([{"action": "screenshot"}], False))
+            self.assertEqual(fake_env.step_calls[1], ([], True))
+            self.assertEqual(fake_env.trajectory_metadata[0]["semantic_step_id"], 1)
+            event_names = [event["event"] for event in fake_env.trajectory_events]
+            self.assertIn("semantic_step_complete", event_names)
+            self.assertIn("semantic_trajectory_complete", event_names)
+            policy = _FakeSemanticPolicy.instances[0]
+            self.assertFalse(policy.finish_info["verifier"]["passed"])
+            self.assertIn("Current semantic step: 1 / 1", policy.execution_context)
+
+    def test_semantic_agent_finish_before_last_step_logs_violation(self) -> None:
+        class _EarlyFinishPolicy(_FakePolicy):
+            def set_execution_context(self, context):
+                self.execution_context = context
+
+            def step(self, obs, action_outputs):
+                self.step_calls.append((obs, list(action_outputs)))
+                self.done = True
+                return [{"tool_id": "tool-1", "actions": []}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            trajectory_path = Path(tmp) / "semantic.json"
+            trajectory_path.write_text(
+                json.dumps({"steps": ["Open the project.", "Commit the file."]}),
+                encoding="utf-8",
+            )
+            fake_env = _FakeEnv(Path(tmp))
+            args = SimpleNamespace(
+                env_dir="demo-env",
+                seed=42,
+                task="demo-task",
+                steps=2,
+                agent="EarlyFinishPolicy",
+                agent_args=json.dumps({"model": "gemini-demo"}),
+                semantic_trajectory_path=str(trajectory_path),
+                debug=False,
+                debug_low=False,
+                verbose=False,
+                setup_code="none",
+                use_cache=False,
+                cache_level="pre_start",
+                use_savevm=False,
+                vlm_backend="local",
+                vlm_base_url="http://localhost:8080/v1",
+                vlm_model="gemini-demo",
+                remote_url=None,
+                remote_timeout=300,
+                remote_worker_reset_policy="core",
+            )
+            checker = mock.Mock()
+            checker.check.return_value = SemanticStepCompletion(
+                completed=False,
+                reason="The project is not visible.",
+            )
+
+            with mock.patch.object(run_single_module, "from_config", return_value=fake_env), \
+                 mock.patch.object(
+                     run_single_module.agent_registry,
+                     "EarlyFinishPolicy",
+                     _EarlyFinishPolicy,
+                     create=True,
+                 ), \
+                 mock.patch.object(
+                     run_single_module,
+                     "SemanticStepCompletionChecker",
+                     return_value=checker,
+                 ):
+                _EarlyFinishPolicy.instances.clear()
+                result = run_single_module.run_single(args)
+
+            self.assertEqual(result, 0)
+            violation = next(
+                event
+                for event in fake_env.trajectory_events
+                if event["event"] == "semantic_trajectory_violation"
+            )
+            self.assertEqual(violation["reason"], "agent_finished_before_trajectory_completed")
+            self.assertEqual(violation["completed_steps"], 0)
+            self.assertEqual(violation["total_steps"], 2)
+            self.assertNotIn(
+                "semantic_trajectory_complete",
+                [event["event"] for event in fake_env.trajectory_events],
+            )
 
 
 if __name__ == "__main__":

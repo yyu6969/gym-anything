@@ -101,6 +101,34 @@ class RemoteClientResetPolicyTests(unittest.TestCase):
             },
         )
 
+    def test_step_and_event_forward_optional_trajectory_metadata(self) -> None:
+        env = self._make_env()
+        step_response = mock.Mock()
+        step_response.json.return_value = {
+            "observation": {},
+            "reward": 0.0,
+            "done": False,
+            "info": {"step": 0},
+        }
+        event = {"event": "semantic_step_start", "semantic_step_id": 1}
+
+        with mock.patch.object(env, "_request", return_value=step_response) as request_mock:
+            env.step([], trajectory_metadata={"semantic_step_id": 1})
+            env.log_trajectory_event(event)
+
+        self.assertEqual(
+            request_mock.call_args_list[0].kwargs["json"]["trajectory_metadata"],
+            {"semantic_step_id": 1},
+        )
+        self.assertEqual(
+            request_mock.call_args_list[1],
+            mock.call(
+                "POST",
+                "/envs/env-123/trajectory_event",
+                json={"event": event},
+            ),
+        )
+
     def test_create_remote_env_sends_verifier_overrides(self) -> None:
         response = mock.Mock()
         response.json.return_value = {"env_id": "env-123"}

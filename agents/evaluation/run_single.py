@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any
 
 import agents.agents as agent_registry
+from agents.evaluation.semantic_trajectory import (
+    SemanticStepCompletion,
+    SemanticStepCompletionChecker,
+    SemanticTrajectoryController,
+    SemanticTrajectoryError,
+)
 from gym_anything.api import from_config
 from gym_anything.remote import RemoteGymEnv
 from tqdm import tqdm
@@ -81,6 +87,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Optional path for per-iteration timing JSONL. Defaults to <episode_dir>/timing.jsonl.",
+    )
+    parser.add_argument(
+        "--semantic_traj_apply",
+        "--semantic_trajectory_path",
+        dest="semantic_trajectory_path",
+        default=None,
+        help="Optional JSON semantic trajectory to enforce during this episode.",
     )
     parser.add_argument(
         "--post_reset_observation_delay",
@@ -307,9 +320,47 @@ def _action_kinds(actions: list[dict[str, Any]]) -> list[str]:
     return kinds
 
 
+def _semantic_step_metadata(controller: SemanticTrajectoryController) -> dict[str, Any]:
+    step = controller.current_step
+    if step is None:
+        return {}
+    return {
+        "semantic_step_id": step.step_id,
+        "semantic_instruction": step.instruction,
+    }
+
+
+def _log_semantic_event(env, event: str, **fields: Any) -> None:
+    env.log_trajectory_event({"event": event, "ts": time.time(), **fields})
+
+
+def _check_semantic_step(
+    checker: SemanticStepCompletionChecker,
+    step,
+    observation: dict[str, Any],
+) -> SemanticStepCompletion:
+    try:
+        return checker.check(step, observation)
+    except Exception as exc:
+        logger.warning("Semantic completion check failed closed for step %s: %s", step.step_id, exc)
+        return SemanticStepCompletion(
+            completed=False,
+            reason=f"Completion checker error: {type(exc).__name__}: {exc}",
+        )
+
+
 def run_single(args: argparse.Namespace) -> int:
     _apply_vlm_settings(args)
     _apply_verifier_settings(args)
+
+    semantic_controller = None
+    semantic_path = getattr(args, "semantic_trajectory_path", None)
+    if semantic_path:
+        try:
+            semantic_controller = SemanticTrajectoryController.load(semantic_path)
+        except SemanticTrajectoryError as exc:
+            logger.error("%s", exc)
+            return 2
 
     setup_timings: dict[str, float] = {}
     overall_start = time.perf_counter()
@@ -348,16 +399,38 @@ def run_single(args: argparse.Namespace) -> int:
         },
     )
     task_description = _load_task_description(env, args.env_dir, args.task)
+    overall_task = task_description or (semantic_controller.task if semantic_controller else "") or ""
     if task_description:
         task_description += "\nUnless explicitly mentioned, you are required to use the UI to complete the task not terminal."
 
     agent_cls = _resolve_agent_class(args.agent)
+    if semantic_controller is not None and not callable(getattr(agent_cls, "set_execution_context", None)):
+        logger.error(
+            "Semantic trajectory mode is not supported by agent %s: missing set_execution_context()",
+            args.agent,
+        )
+        env.close()
+        return 2
     agent = agent_cls(agent_args=json.loads(args.agent_args), verbose=args.verbose, debug=args.debug)
     agent.init(
         task_description=task_description,
         display_resolution=env.env_spec.observation[0].resolution,
         save_path=env.episode_dir,
     )
+    semantic_checker = None
+    if semantic_controller is not None:
+        semantic_checker = SemanticStepCompletionChecker(
+            model=getattr(agent, "model", None) or args.vlm_model,
+        )
+        first_step = semantic_controller.current_step
+        _log_semantic_event(
+            env,
+            "semantic_step_start",
+            semantic_step_id=first_step.step_id,
+            instruction=first_step.instruction,
+            completed_steps=semantic_controller.completed_count,
+            total_steps=semantic_controller.total_steps,
+        )
 
     action_outputs = []
     post_reset_observation_delay = _nonnegative_seconds(args, "post_reset_observation_delay")
@@ -402,6 +475,8 @@ def run_single(args: argparse.Namespace) -> int:
 
         for _step_i in tqdm(range(0 if autonomous else max_steps)):
             iteration_start = time.perf_counter()
+            if semantic_controller is not None:
+                agent.set_execution_context(semantic_controller.current_context(overall_task))
             t0 = time.perf_counter()
             actions = agent.step(obs, action_outputs)
             agent_step_ms = _elapsed_ms(t0)
@@ -411,8 +486,16 @@ def run_single(args: argparse.Namespace) -> int:
 
             for action_group_i, action in enumerate(actions):
                 actual_actions = action["actions"]
+                step_metadata = (
+                    _semantic_step_metadata(semantic_controller)
+                    if semantic_controller is not None
+                    else None
+                )
+                action_step_kwargs = dict(env_step_kwargs)
+                if step_metadata is not None:
+                    action_step_kwargs["trajectory_metadata"] = step_metadata
                 t0 = time.perf_counter()
-                obs, _reward, done, info = env.step(actual_actions, **env_step_kwargs)
+                obs, _reward, done, info = env.step(actual_actions, **action_step_kwargs)
                 env_step_ms = _elapsed_ms(t0)
                 refreshed_obs, post_step_delay_ms, post_step_capture_ms = _refresh_observation_after_delay(
                     env,
@@ -465,10 +548,84 @@ def run_single(args: argparse.Namespace) -> int:
                     }
                 )
 
+                if semantic_controller is not None:
+                    current_step = semantic_controller.current_step
+                    completion = _check_semantic_step(semantic_checker, current_step, obs)
+                    _log_semantic_event(
+                        env,
+                        "semantic_step_check",
+                        semantic_step_id=current_step.step_id,
+                        instruction=current_step.instruction,
+                        completed=completion.completed,
+                        reason=completion.reason,
+                    )
+                    if completion.completed:
+                        completed_step = semantic_controller.advance()
+                        _log_semantic_event(
+                            env,
+                            "semantic_step_complete",
+                            semantic_step_id=completed_step.step_id,
+                            instruction=completed_step.instruction,
+                            reason=completion.reason,
+                            completed_steps=semantic_controller.completed_count,
+                            total_steps=semantic_controller.total_steps,
+                        )
+                        if semantic_controller.is_finished():
+                            _log_semantic_event(
+                                env,
+                                "semantic_trajectory_complete",
+                                completed_steps=semantic_controller.completed_count,
+                                total_steps=semantic_controller.total_steps,
+                            )
+                        else:
+                            next_step = semantic_controller.current_step
+                            _log_semantic_event(
+                                env,
+                                "semantic_step_start",
+                                semantic_step_id=next_step.step_id,
+                                instruction=next_step.instruction,
+                                completed_steps=semantic_controller.completed_count,
+                                total_steps=semantic_controller.total_steps,
+                            )
+                        # Any remaining groups were planned under the completed
+                        # step's context and must not spill into the next step.
+                        break
+
             mark_done_step_ms = None
-            if getattr(agent, "done", False) or done:
+            agent_finished = bool(getattr(agent, "done", False))
+            semantic_finished = bool(
+                semantic_controller is not None and semantic_controller.is_finished()
+            )
+            if semantic_controller is not None and not semantic_finished and (agent_finished or done):
+                violation_reason = (
+                    "agent_finished_before_trajectory_completed"
+                    if agent_finished
+                    else "environment_finished_before_trajectory_completed"
+                )
+                _log_semantic_event(
+                    env,
+                    "semantic_trajectory_violation",
+                    reason=violation_reason,
+                    completed_steps=semantic_controller.completed_count,
+                    total_steps=semantic_controller.total_steps,
+                    semantic_step_id=semantic_controller.current_step.step_id,
+                )
+
+            if agent_finished or done or semantic_finished:
                 t0 = time.perf_counter()
-                obs, _reward, done, info = env.step([], mark_done=True, **env_step_kwargs)
+                mark_done_metadata = (
+                    _semantic_step_metadata(semantic_controller)
+                    if semantic_controller is not None and not semantic_controller.is_finished()
+                    else None
+                )
+                mark_done_kwargs = dict(env_step_kwargs)
+                if mark_done_metadata is not None:
+                    mark_done_kwargs["trajectory_metadata"] = mark_done_metadata
+                obs, _reward, done, info = env.step(
+                    [],
+                    mark_done=True,
+                    **mark_done_kwargs,
+                )
                 mark_done_step_ms = _elapsed_ms(t0)
                 env_step_records.append(
                     {

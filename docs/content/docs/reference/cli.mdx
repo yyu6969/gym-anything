@@ -76,6 +76,9 @@ Important flags:
   refreshing the observation that goes to the next model turn
 - `--timing-jsonl`: choose the per-iteration timing log path for a single-task
   run; otherwise it is written under the episode directory
+- `--semantic_traj_apply PATH`: enforce a semantic trajectory JSON for a
+  `Gemini3Agent` single-task run; only the active semantic step is exposed to
+  the agent, and the existing task verifier still decides PASS/FAIL
 - `--agent-arg KEY=VALUE`: extra agent argument (repeatable)
 - `--remote-url`: route environment execution through a remote master or worker
 - `--remote-timeout`: HTTP timeout for remote calls

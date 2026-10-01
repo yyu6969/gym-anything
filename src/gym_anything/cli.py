@@ -532,6 +532,8 @@ def _run_benchmark_batch(args) -> int:
             cmd.extend(["--post-step-observation-delay", str(args.post_step_observation_delay)])
         if getattr(args, "temperature", None) is not None:
             cmd.extend(["--temperature", str(args.temperature)])
+        if getattr(args, "semantic_traj_apply", None):
+            cmd.extend(["--semantic_traj_apply", args.semantic_traj_apply])
         if getattr(args, "remote_url", None):
             cmd.extend(["--remote-url", args.remote_url])
             cmd.extend(["--remote-timeout", str(args.remote_timeout)])
@@ -611,6 +613,8 @@ def cmd_benchmark(args) -> int:
     info.add_row("Seed", str(args.seed))
     info.add_row("Fast I/O", "on" if args.fast_io else "off")
     info.add_row("Disable thinking", "on" if args.disable_thinking else "off")
+    if getattr(args, "semantic_traj_apply", None):
+        info.add_row("Semantic trajectory", args.semantic_traj_apply)
     if args.remote_url:
         info.add_row("Remote", args.remote_url)
 
@@ -643,6 +647,7 @@ def cmd_benchmark(args) -> int:
         post_reset_observation_delay=getattr(args, "post_reset_observation_delay", 0.0),
         post_step_observation_delay=getattr(args, "post_step_observation_delay", 0.0),
         timing_jsonl=args.timing_jsonl,
+        semantic_trajectory_path=getattr(args, "semantic_traj_apply", None),
         vlm_backend=os.environ.get("VLM_BACKEND", "local"),
         vlm_base_url=os.environ.get("VLM_BASE_URL", "http://localhost:8080/v1"),
         vlm_model=os.environ.get("VLM_MODEL") or args.model or "Qwen/Qwen3-VL-4B-Thinking",
@@ -1211,6 +1216,11 @@ def main(argv=None):
     p_bench.add_argument(
         "--timing-jsonl",
         help="Optional per-iteration timing JSONL path for single-task benchmark runs",
+    )
+    p_bench.add_argument(
+        "--semantic_traj_apply",
+        metavar="PATH",
+        help="Execute an optional semantic trajectory JSON in strict step order",
     )
     p_bench.add_argument("--remote-url", help="Remote master or worker URL for environment execution")
     p_bench.add_argument("--remote-timeout", type=int, default=300, help="Remote HTTP request timeout")

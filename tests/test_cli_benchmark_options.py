@@ -29,6 +29,7 @@ class BenchmarkCliOptionsTests(unittest.TestCase):
             fast_io=True,
             disable_thinking=True,
             timing_jsonl=None,
+            semantic_traj_apply=None,
             remote_url=None,
             remote_timeout=300,
             remote_worker_reset_policy="core",
@@ -57,6 +58,7 @@ class BenchmarkCliOptionsTests(unittest.TestCase):
         self.assertEqual(ns.vlm_model, "Qwen/Qwen3.5-2B")
         self.assertTrue(ns.fast_io)
         self.assertTrue(ns.disable_thinking)
+        self.assertIsNone(ns.semantic_trajectory_path)
 
     def test_benchmark_respects_explicit_vlm_model_env(self) -> None:
         with mock.patch("agents.evaluation.run_single.run_single", return_value=0) as run_single, \
@@ -66,6 +68,36 @@ class BenchmarkCliOptionsTests(unittest.TestCase):
         self.assertEqual(result, 0)
         ns = run_single.call_args.args[0]
         self.assertEqual(ns.vlm_model, "custom/verifier-model")
+
+    def test_benchmark_forwards_semantic_trajectory_path(self) -> None:
+        args = self._args()
+        args.semantic_traj_apply = "/tmp/semantic.json"
+        with mock.patch("agents.evaluation.run_single.run_single", return_value=0) as run_single:
+            result = cli.cmd_benchmark(args)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            run_single.call_args.args[0].semantic_trajectory_path,
+            "/tmp/semantic.json",
+        )
+
+    def test_parser_accepts_semantic_traj_apply_spelling(self) -> None:
+        with mock.patch.object(cli, "cmd_benchmark", return_value=0) as benchmark:
+            result = cli.main(
+                [
+                    "benchmark",
+                    "demo-env",
+                    "--task",
+                    "demo-task",
+                    "--agent",
+                    "Gemini3Agent",
+                    "--semantic_traj_apply",
+                    "/tmp/semantic.json",
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(benchmark.call_args.args[0].semantic_traj_apply, "/tmp/semantic.json")
 
 
 if __name__ == "__main__":
