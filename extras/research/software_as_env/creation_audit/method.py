@@ -367,7 +367,13 @@ def _path_context_prompt(
         "destination shown in those instructions. Do not modify or create files "
         "inside the Gym reference repository. Write generated environment files "
         "only inside the target environment directory; use the writable workspace "
-        "for any other temporary working files."
+        "for any other temporary working files. The absolute paths in this section "
+        "are creator-run locations only: never persist them in env.json, task.json, "
+        "hooks, mount sources, recording paths, or other runtime configuration. Use "
+        "environment-relative host paths such as ./scripts, ./config, ./assets, "
+        "./tasks, and ./artifacts. Guest paths may still use runtime filesystem "
+        "locations such as /workspace/scripts, /workspace/config, /workspace/assets, "
+        "and /workspace/tasks."
     )
 
 
