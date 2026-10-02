@@ -611,6 +611,7 @@ class CodexSessionTests(unittest.TestCase):
             spec_source = root / "environment_spec.json"
             state_source = root / "environment_initial_state.json"
             instruction_source = root / "step4_candidate_selection.json"
+            video_source = root / "video.mp4"
             with (
                 mock.patch.object(ca, "_resolve_bin", return_value=Path("/tmp/codex")),
                 mock.patch.object(ca, "_codex_invoke") as invoke,
@@ -635,6 +636,7 @@ class CodexSessionTests(unittest.TestCase):
                     environment_spec_path=spec_source,
                     task_instruction=TASK_INSTRUCTION,
                     task_instruction_path=instruction_source,
+                    video_path=video_source,
                     environment_initial_state=VALID_ENVIRONMENT_INITIAL_STATE,
                     environment_initial_state_path=state_source,
                 )
@@ -644,10 +646,15 @@ class CodexSessionTests(unittest.TestCase):
                 )
 
         self.assertEqual(result, 0)
-        self.assertIn(f"Task Instruction: >>>\n{TASK_INSTRUCTION}", creation_prompt)
-        self.assertIn("Environment Specification: >>>", creation_prompt)
-        self.assertIn("Environment Initial State: >>>", creation_prompt)
+        self.assertIn(f"Task instruction: >>>\n{TASK_INSTRUCTION}", creation_prompt)
+        self.assertIn(f"Video: >>>\n@{video_source}", creation_prompt)
+        self.assertIn("Additional environment specification: >>>", creation_prompt)
+        self.assertIn(
+            "Additional environment initial-state information: >>>",
+            creation_prompt,
+        )
         self.assertIn(f"Task Instruction Source: {instruction_source}", log_text)
+        self.assertIn(f"Video Source: {video_source}", log_text)
         self.assertIn(f"EnvironmentSpec Source: {spec_source}", log_text)
         self.assertIn(f"Environment Initial State Source: {state_source}", log_text)
 
@@ -813,6 +820,7 @@ class PromptAssemblyTests(unittest.TestCase):
             environment_spec=VALID_ENVIRONMENT_SPEC,
             task_instruction=TASK_INSTRUCTION,
             environment_initial_state=VALID_ENVIRONMENT_INITIAL_STATE,
+            video=Path("/workspace/input/video.mp4"),
         )
         with tempfile.TemporaryDirectory() as tmp:
             audit = ca._audit_run_prompt(
@@ -822,28 +830,36 @@ class PromptAssemblyTests(unittest.TestCase):
                 environment_spec=VALID_ENVIRONMENT_SPEC,
                 task_instruction=TASK_INSTRUCTION,
                 environment_initial_state=VALID_ENVIRONMENT_INITIAL_STATE,
+                video=Path("/workspace/input/video.mp4"),
             )
 
         for prompt in (creation, audit):
-            self.assertIn("## Input", prompt)
-            self.assertIn("Software: >>>\nGitLab\n<<<", prompt)
+            self.assertIn("## Creation Inputs", prompt)
             self.assertIn(
-                f"Task Instruction: >>>\n{TASK_INSTRUCTION}\n<<<",
+                f"Task instruction: >>>\n{TASK_INSTRUCTION}\n<<<",
                 prompt,
             )
             self.assertIn(
-                f"Environment Specification: >>>\n{rendered_spec}\n<<<",
+                "Video: >>>\n@/workspace/input/video.mp4\n<<<",
                 prompt,
             )
             self.assertIn(
-                "Environment Initial State: >>>\n"
+                "Additional environment specification: >>>\n"
+                f"{rendered_spec}\n<<<",
+                prompt,
+            )
+            self.assertIn(
+                "Additional environment initial-state information: >>>\n"
                 f"{rendered_initial_state}\n<<<",
                 prompt,
             )
             self.assertLess(
-                prompt.index("Environment Specification: >>>"),
-                prompt.index("Environment Initial State: >>>"),
+                prompt.index("Additional environment specification: >>>"),
+                prompt.index(
+                    "Additional environment initial-state information: >>>"
+                ),
             )
+            self.assertIn("video as the primary evidence", prompt)
             self.assertIn("stable, shared world", prompt)
             self.assertIn("per-task episode setup", prompt)
             self.assertIn("Preserve its exact wording and intent", prompt)
@@ -862,14 +878,19 @@ class PromptAssemblyTests(unittest.TestCase):
             "task_instruction": TASK_INSTRUCTION,
             "environment_initial_state": VALID_ENVIRONMENT_INITIAL_STATE,
             "software": "GitLab",
+            "video": Path("/workspace/input/video.mp4"),
         }
         nudge = ca._nudge_prompt(prompts, **kwargs)
         feedback = ca._audit_feedback_prompt("audit text", **kwargs)
 
         for prompt in (nudge, feedback):
             self.assertIn(TASK_INSTRUCTION, prompt)
-            self.assertIn("Environment Specification: >>>", prompt)
-            self.assertIn("Environment Initial State: >>>", prompt)
+            self.assertIn("Video: >>>", prompt)
+            self.assertIn("Additional environment specification: >>>", prompt)
+            self.assertIn(
+                "Additional environment initial-state information: >>>",
+                prompt,
+            )
 
     def test_task_instruction_only_is_rendered_without_invented_context(self):
         prompts = ca._packaged_memory_dir()
@@ -881,8 +902,11 @@ class PromptAssemblyTests(unittest.TestCase):
         )
 
         self.assertIn(TASK_INSTRUCTION, prompt)
-        self.assertNotIn("Environment Specification: >>>", prompt)
-        self.assertNotIn("Environment Initial State: >>>", prompt)
+        self.assertNotIn("Additional environment specification: >>>", prompt)
+        self.assertNotIn(
+            "Additional environment initial-state information: >>>",
+            prompt,
+        )
 
 
 if __name__ == "__main__":

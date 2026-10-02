@@ -381,20 +381,34 @@ def _aab_context_prompt(
     *,
     software: str,
     task_instruction: str | None,
+    video: Path | None,
     environment_spec: dict[str, Any] | None,
     environment_initial_state: dict[str, Any] | None,
     audit: bool,
 ) -> str:
     if (
         task_instruction is None
+        and video is None
         and environment_spec is None
         and environment_initial_state is None
     ):
         return ""
 
-    sections = [f"## Input\n\nSoftware: >>>\n{software}\n<<<"]
+    sections = ["## Creation Inputs"]
     if task_instruction is not None:
-        sections.append(f"Task Instruction: >>>\n{task_instruction}\n<<<")
+        sections.append(f"Task instruction: >>>\n{task_instruction}\n<<<")
+    if video is not None:
+        sections.append(
+            f"Video: >>>\n@{video.as_posix()}\n<<<\n\n"
+            "Reconstruct an environment in which the demonstrated task can be "
+            "successfully executed.\n\n"
+            "Use the video as the primary evidence for:\n"
+            "- application/software\n"
+            "- task-relevant UI state\n"
+            "- task-relevant data\n"
+            "- repository/project state\n"
+            "- functionality required by the demonstrated workflow"
+        )
     if environment_spec is not None:
         rendered_spec = json.dumps(
             {"environment_spec": environment_spec},
@@ -402,7 +416,9 @@ def _aab_context_prompt(
             ensure_ascii=False,
             sort_keys=True,
         )
-        sections.append(f"Environment Specification: >>>\n{rendered_spec}\n<<<")
+        sections.append(
+            f"Additional environment specification: >>>\n{rendered_spec}\n<<<"
+        )
     if environment_initial_state is not None:
         rendered_initial_state = json.dumps(
             {"environment_initial_state": environment_initial_state},
@@ -411,28 +427,38 @@ def _aab_context_prompt(
             sort_keys=True,
         )
         sections.append(
-            "Environment Initial State: >>>\n"
+            "Additional environment initial-state information: >>>\n"
             f"{rendered_initial_state}\n"
             "<<<"
         )
 
     responsibilities = [
         "Keep these inputs semantically separate; do not flatten them into one "
-        "undifferentiated set of environment facts."
+        "undifferentiated set of environment facts.",
+        f"Treat {software!r} only as a software hint when it is not established "
+        "by the video or structured inputs.",
     ]
+    if video is not None:
+        responsibilities.append(
+            "The video remains the primary evidence even when structured "
+            "context is supplied. Inspect the accessible video file directly; do "
+            "not treat additional JSON as a replacement for it."
+        )
     if environment_spec is not None:
         responsibilities.append(
-            "Environment Specification describes the stable, shared world. Use it "
-            "for environment construction/configuration, persistent entities and "
-            "data, relationships, permissions, and capabilities. Do not move "
-            "transient task state into permanent environment setup."
+            "Additional environment specification is helpful structured context "
+            "for the stable, shared world. Use it for environment construction/"
+            "configuration, persistent entities and data, relationships, "
+            "permissions, and capabilities. Do not move transient task state into "
+            "permanent environment setup."
         )
     if environment_initial_state is not None:
         responsibilities.append(
-            "Environment Initial State describes per-task episode setup. Implement "
-            "task_preconditions in the existing task setup/reset hook, and use "
-            "episode_start to prepare the initial application, page, authenticated "
-            "session, and visible UI state. These are not permanent world properties."
+            "Additional environment initial-state information is helpful structured "
+            "context for per-task episode setup. Implement task_preconditions in the "
+            "existing task setup/reset hook, and use episode_start to prepare the "
+            "initial application, page, authenticated session, and visible UI state. "
+            "These are not permanent world properties."
         )
     if task_instruction is not None:
         responsibilities.append(
@@ -445,10 +471,8 @@ def _aab_context_prompt(
     if audit:
         responsibilities.append(
             "Audit each supplied input against its own responsibility using direct "
-            "evidence: shared-world compliance for Environment Specification, "
-            "pre-task/reset/start-state compliance for Environment Initial State, "
-            "and exact task-description and task-support compliance for Task "
-            "Instruction. Do not accept the creation agent's claims as proof."
+            "evidence, including the video when supplied. Do not accept "
+            "the creation agent's claims as proof."
         )
     else:
         responsibilities.append(
@@ -493,6 +517,7 @@ def _initial_prompt(
     reference_root: Path | None = None,
     workspace: Path | None = None,
     environment_dir: Path | None = None,
+    video: Path | None = None,
 ) -> str:
     target = environment_dir.as_posix() if environment_dir is not None else env_dir
     prompt = (
@@ -507,6 +532,7 @@ def _initial_prompt(
         + _aab_context_prompt(
             software=software,
             task_instruction=task_instruction,
+            video=video,
             environment_spec=environment_spec,
             environment_initial_state=environment_initial_state,
             audit=False,
@@ -529,6 +555,7 @@ def _nudge_prompt(
     reference_root: Path | None = None,
     workspace: Path | None = None,
     environment_dir: Path | None = None,
+    video: Path | None = None,
 ) -> str:
     prompt = (
         f"reread @{_creation_prompt_path(memory_dir, platform)}. "
@@ -543,7 +570,12 @@ def _nudge_prompt(
     )
     if all(
         value is None
-        for value in (task_instruction, environment_spec, environment_initial_state)
+        for value in (
+            task_instruction,
+            video,
+            environment_spec,
+            environment_initial_state,
+        )
     ):
         return prompt + path_context
     return (
@@ -551,6 +583,7 @@ def _nudge_prompt(
         + _aab_context_prompt(
             software=_resolve_context_software(software, environment_spec),
             task_instruction=task_instruction,
+            video=video,
             environment_spec=environment_spec,
             environment_initial_state=environment_initial_state,
             audit=False,
@@ -588,6 +621,7 @@ def _audit_run_prompt(
     reference_root: Path | None = None,
     workspace: Path | None = None,
     environment_dir: Path | None = None,
+    video: Path | None = None,
 ) -> str:
     audit_file_rel = (audits_dir / f"audit_{env_dir}.md").as_posix()
     target_dir = (
@@ -607,7 +641,12 @@ def _audit_run_prompt(
     )
     if all(
         value is None
-        for value in (task_instruction, environment_spec, environment_initial_state)
+        for value in (
+            task_instruction,
+            video,
+            environment_spec,
+            environment_initial_state,
+        )
     ):
         return prompt + path_context
     return (
@@ -615,6 +654,7 @@ def _audit_run_prompt(
         + _aab_context_prompt(
             software=_resolve_context_software(software, environment_spec),
             task_instruction=task_instruction,
+            video=video,
             environment_spec=environment_spec,
             environment_initial_state=environment_initial_state,
             audit=True,
@@ -632,6 +672,7 @@ def _audit_feedback_prompt(
     reference_root: Path | None = None,
     workspace: Path | None = None,
     environment_dir: Path | None = None,
+    video: Path | None = None,
 ) -> str:
     prompt = (
         f"An independent audit of your progress was performed. Here is the "
@@ -646,7 +687,12 @@ def _audit_feedback_prompt(
     )
     if all(
         value is None
-        for value in (task_instruction, environment_spec, environment_initial_state)
+        for value in (
+            task_instruction,
+            video,
+            environment_spec,
+            environment_initial_state,
+        )
     ):
         return prompt + path_context
     return (
@@ -654,6 +700,7 @@ def _audit_feedback_prompt(
         + _aab_context_prompt(
             software=_resolve_context_software(software, environment_spec),
             task_instruction=task_instruction,
+            video=video,
             environment_spec=environment_spec,
             environment_initial_state=environment_initial_state,
             audit=False,
@@ -683,6 +730,7 @@ def run_creation_audit(
     environment_spec_path: Path | None = None,
     task_instruction: str | None = None,
     task_instruction_path: Path | None = None,
+    video_path: Path | None = None,
     environment_initial_state: dict[str, Any] | None = None,
     environment_initial_state_path: Path | None = None,
     reference_root: Path | None = None,
@@ -775,6 +823,8 @@ def run_creation_audit(
         log_text += f"Task Instruction Source: {task_instruction_path}\n"
     if task_instruction is not None:
         log_text += f"Task Instruction:\n{task_instruction}\n"
+    if video_path is not None:
+        log_text += f"Video Source: {video_path}\n"
     if environment_spec_path is not None:
         log_text += f"EnvironmentSpec Source: {environment_spec_path}\n"
     if environment_spec is not None:
@@ -821,6 +871,7 @@ def run_creation_audit(
                 environment_spec,
                 task_instruction,
                 environment_initial_state,
+                video=video_path,
                 **prompt_paths,
             ),
             # Codex cannot accept a caller-selected session id for a fresh exec.
@@ -848,6 +899,7 @@ def run_creation_audit(
                 task_instruction,
                 environment_initial_state,
                 software,
+                video=video_path,
                 **prompt_paths,
             ),
             resume=True,
@@ -884,6 +936,7 @@ def run_creation_audit(
                     task_instruction,
                     environment_initial_state,
                     software,
+                    video=video_path,
                     **prompt_paths,
                 ),
                 session_id=audit_session,
@@ -912,6 +965,7 @@ def run_creation_audit(
                     task_instruction,
                     environment_initial_state,
                     software,
+                    video=video_path,
                     **prompt_paths,
                 ),
                 session_id=audit_session,
@@ -935,6 +989,7 @@ def run_creation_audit(
                 task_instruction,
                 environment_initial_state,
                 software,
+                video=video_path,
                 **prompt_paths,
             ),
             resume=True,
