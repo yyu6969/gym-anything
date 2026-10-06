@@ -44,6 +44,7 @@ from google import genai
 from google.genai import types
 
 from agents.agents.base import BaseAgent
+from agents.shared.output_paths import agent_run_base
 
 load_dotenv()
 
@@ -194,7 +195,7 @@ class GeminiComputerUseAgent(BaseAgent):
     # ---- bookkeeping (mirrors the other agents) ---------------------------
     def setup_custom_logger(self):
         task_name = self.agent_args.get("task_name", "task")
-        base = f"all_runs/{self.exp_name}/{self.model}/{task_name}"
+        base = agent_run_base(self.exp_name, self.model, task_name)
         self.save_folder_custom = base
         for run_number in range(0, 100):
             if os.path.exists(f"{base}/run_{run_number}"):

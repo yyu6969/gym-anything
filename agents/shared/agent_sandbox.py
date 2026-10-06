@@ -40,6 +40,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
+from gym_anything.runtime_paths import reusable_cache_paths
+
 logger = logging.getLogger(__name__)
 
 
@@ -185,11 +187,10 @@ class DockerSandbox(AgentSandbox):
 class ApptainerSandbox(AgentSandbox):
     gateway_bind_host = "127.0.0.1"  # shares host net; reaches the host on loopback
 
-    _CACHE_DIR = Path.home() / ".cache" / "gym-anything" / "agent-sandbox"
-
     def __init__(self, spec: SandboxSpec, logs_dir: Path):
         super().__init__(spec, logs_dir)
-        self.sif_path = self._CACHE_DIR / f"{spec.name}-{spec.digest()}.sif"
+        cache_dir = reusable_cache_paths().agent_sandbox
+        self.sif_path = cache_dir / f"{spec.name}-{spec.digest()}.sif"
         self.instance_name = f"gym-agent-{spec.name}-{os.urandom(4).hex()}"
         self._env_file: Path | None = None
 

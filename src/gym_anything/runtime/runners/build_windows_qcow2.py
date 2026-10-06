@@ -36,7 +36,9 @@ import tempfile
 import time
 from pathlib import Path
 
-QEMU_CACHE = Path(os.environ.get("GYM_ANYTHING_QEMU_CACHE", "~/.cache/gym-anything/qemu")).expanduser()
+from ...runtime_paths import reusable_cache_paths
+
+QEMU_CACHE = reusable_cache_paths().qemu
 DOCKUR_IMAGE = "ghcr.io/dockur/windows:latest"
 
 # Post-installation script to configure Windows for automation

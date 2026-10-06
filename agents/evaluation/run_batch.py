@@ -14,11 +14,13 @@ from gym_anything.registry import (
     resolve_environment_dir,
     resolve_environment_key,
 )
+from gym_anything.runtime_paths import configure_runtime_paths, runtime_paths
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="mPLUG/GUI-Owl-32B")
+    parser.add_argument("--output_dir", "--output-dir", default=None)
     parser.add_argument("--agent", type=str, default="OwlAgent")
     parser.add_argument("--exp_name", type=str, default="owl-gui-normal-highres-all")
     parser.add_argument("--use_cache", action="store_true")
@@ -80,6 +82,7 @@ def _build_task_env_pairs(args: argparse.Namespace) -> list[tuple[str, str]]:
 
 
 def run_batch(args: argparse.Namespace) -> int:
+    paths = configure_runtime_paths(getattr(args, "output_dir", None))
     task_env_pairs = _build_task_env_pairs(args)
     random.shuffle(task_env_pairs)
 
@@ -92,7 +95,7 @@ def run_batch(args: argparse.Namespace) -> int:
     for _repeat in range(args.repeat):
         print(f"Starting {len(task_env_pairs)} tasks")
         for task_id, env_dir in task_env_pairs:
-            run_root = f"all_runs/{args.exp_name}/{args.model}/{task_id}/"
+            run_root = paths.all_runs / args.exp_name / args.model / task_id
             try:
                 run_count = len(os.listdir(run_root))
                 print(f"Run count: {run_count} for folder: {run_root}")
@@ -126,6 +129,8 @@ def run_batch(args: argparse.Namespace) -> int:
                 str(args.max_steps),
                 "--cache_level",
                 args.cache_level,
+                "--output_dir",
+                str(paths.root),
             ]
             if args.use_cache:
                 command.append("--use_cache")

@@ -18,6 +18,8 @@ import tarfile
 import tempfile
 import zipfile
 
+from ...runtime_paths import reusable_cache_paths
+
 
 GIB = 1024**3
 RUNNERS = Path(__file__).parent
@@ -225,7 +227,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True, help='New release artifact directory')
     parser.add_argument('--source-qcow2', type=Path,
-                        default=Path('~/.cache/gym-anything/qemu/base_ubuntu_gnome.qcow2').expanduser())
+                        default=reusable_cache_paths().qemu / 'base_ubuntu_gnome.qcow2')
     parser.add_argument('--prepared-rootfs', type=Path, help='Repackage a previous maintainer export')
     parser.add_argument('--provenance', type=Path, help='Required provenance for --prepared-rootfs')
     args = parser.parse_args()

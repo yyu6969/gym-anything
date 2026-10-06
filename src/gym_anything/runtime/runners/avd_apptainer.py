@@ -44,6 +44,7 @@ from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from ...security import wrap_posix_command_with_env
 from ...specs import EnvSpec
+from ...runtime_paths import reusable_cache_paths
 from .avd_sdk_manager import AVDSDKManager, DEFAULT_CACHE_DIR
 from .base import BaseRunner
 
@@ -53,16 +54,11 @@ AVD_PORT_RANGE_START = 5554
 AVD_PORT_RANGE_END = 5700
 
 # Checkpoint cache directory
-AVD_CHECKPOINT_CACHE = Path(os.environ.get(
-    "GYM_ANYTHING_AVD_CHECKPOINT_CACHE",
-    "~/.cache/gym-anything/avd-checkpoints"
-)).expanduser()
+_REUSABLE_CACHES = reusable_cache_paths()
+AVD_CHECKPOINT_CACHE = _REUSABLE_CACHES.avd_checkpoints
 
 # Apptainer container for Android emulator
-AVD_CONTAINER_CACHE = Path(os.environ.get(
-    "GYM_ANYTHING_AVD_CONTAINER_CACHE",
-    "~/.cache/gym-anything/containers"
-)).expanduser()
+AVD_CONTAINER_CACHE = _REUSABLE_CACHES.containers
 AVD_CONTAINER_SIF = AVD_CONTAINER_CACHE / "avd_emulator.sif"
 AVD_CONTAINER_DEF = Path(__file__).parent / "avd_container.def"
 

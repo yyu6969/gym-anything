@@ -24,7 +24,7 @@ uv pip install -e ".[all]"
 gym-anything doctor
 
 # 3. Run an environment interactively
-gym-anything run moodle --task enroll_student -i --open-vnc
+gym-anything run moodle --task enroll_student -i --open-vnc --output-dir /path/to/output
 ```
 
 ## Run A Benchmark End To End
@@ -32,10 +32,19 @@ gym-anything run moodle --task enroll_student -i --open-vnc
 Pick an environment, pick a task, pick an agent:
 
 ```bash
-gym-anything benchmark moodle --task enroll_student --agent ClaudeAgent --model claude-opus-4-6
+gym-anything benchmark moodle --task enroll_student --agent ClaudeAgent --model claude-opus-4-6 --output-dir /path/to/output
 ```
 
 This starts the Moodle environment, resets it, hands the task to the agent, lets the agent interact with the application through screenshots and mouse/keyboard actions, and runs the automatic checker when the agent finishes.
+
+`--output-dir` is the canonical root for run/experiment output. If omitted,
+Gym-Anything uses `GYM_ANYTHING_OUTPUT_DIR`, then
+`$XDG_STATE_HOME/gym-anything` (or `~/.local/state/gym-anything`). Benchmark
+definitions remain read-only source resources. Reusable VM images, checkpoints,
+SDKs, and container images do not move with `--output-dir`; runner-specific
+cache variables take precedence, followed by `GYM_ANYTHING_CACHE_DIR`, then the
+stable machine cache rooted at `~/.cache/gym-anything`. Existing runner-specific
+historical defaults are preserved where they differ.
 
 To run across many tasks at once:
 

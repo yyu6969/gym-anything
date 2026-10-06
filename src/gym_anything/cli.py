@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
 import random
@@ -18,6 +17,7 @@ from .compatibility import (
     render_compatibility_text,
 )
 from .doctor import render_doctor_text, render_doctor_rich, run_doctor
+from .runtime_paths import configure_runtime_paths, reusable_cache_paths, runtime_paths
 from .verification import (
     build_missing_hook_reference_manifest,
     build_task_status_manifest,
@@ -238,12 +238,17 @@ def _pick_random_task(env_dir: str) -> str:
 
 
 def cmd_run(args):
+    paths = configure_runtime_paths(getattr(args, "output_dir", None))
     args.env_dir = _resolve_env_dir(args.env_dir, getattr(args, "benchmark", DEFAULT_BENCHMARK))
     if not args.task:
         args.task = _pick_random_task(args.env_dir)
         if args.task:
             print(f"No task specified, randomly selected: {args.task}")
-    env = from_config(args.env_dir, task_id=args.task)
+    env = from_config(
+        args.env_dir,
+        task_id=args.task,
+        overrides={"recording": {"output_dir": str(paths.artifacts)}},
+    )
 
     if args.interactive:
         from .tui.progress import create_reporter
@@ -436,6 +441,7 @@ def _build_agent_args(args) -> dict:
 
 def _run_benchmark_batch(args) -> int:
     """Run benchmark in batch mode across multiple tasks."""
+    configure_runtime_paths(getattr(args, "output_dir", None))
     from .registry import (
         get_tasks_for_environment,
         load_environment_task_splits,
@@ -469,17 +475,17 @@ def _run_benchmark_batch(args) -> int:
     def _runs_done(task_id: str) -> bool:
         # With --min-runs N: a task is "done" once it has N completed runs
         # (run_*/info.json). Otherwise (plain --skip-existing): done if any run_* exists.
-        base = f"all_runs/{args.exp_name}/{args.model}/{task_id}"
+        base = runtime_paths().all_runs / args.exp_name / args.model / task_id
         if min_runs:
-            return len(glob.glob(f"{base}/run_*/info.json")) >= int(min_runs)
-        return bool(glob.glob(f"{base}/run_*"))
+            return len(list(base.glob("run_*/info.json"))) >= int(min_runs)
+        return any(base.glob("run_*"))
 
     if getattr(args, "skip_existing", False) or min_runs:
         if not args.exp_name or not args.model:
             print("--skip-existing/--min-runs ignored: requires --exp-name and --model to locate output dirs.",
                   file=sys.stderr)
         else:
-            # Mirror the reference agents' save path: all_runs/<exp>/<model>/<task>/run_*
+            # Mirror the reference agents' save path beneath the runtime root.
             kept, skipped = [], 0
             for task_id, env_dir in pairs:
                 if _runs_done(task_id):
@@ -511,6 +517,7 @@ def _run_benchmark_batch(args) -> int:
             "--agent", args.agent,
             "--seed", str(args.seed),
             "--cache-level", args.cache_level,
+            "--output-dir", str(runtime_paths().root),
         ]
         if args.steps is not None:
             cmd.extend(["--steps", str(args.steps)])
@@ -580,6 +587,7 @@ def _run_benchmark_batch(args) -> int:
 
 
 def cmd_benchmark(args) -> int:
+    paths = configure_runtime_paths(getattr(args, "output_dir", None))
     try:
         from agents.evaluation.run_single import run_single as _run_single
     except ImportError:
@@ -664,11 +672,12 @@ def cmd_benchmark(args) -> int:
         remote_url=args.remote_url,
         remote_timeout=args.remote_timeout,
         remote_worker_reset_policy=args.remote_worker_reset_policy,
+        output_dir=str(paths.root),
     )
     return _run_single(ns)
 
 
-_CACHE_ROOT = Path.home() / ".cache" / "gym-anything"
+_CACHE_ROOT = reusable_cache_paths().root
 
 def _cache_size(path: Path) -> int:
     """Return actual disk usage of a path in bytes (handles sparse files)."""
@@ -1160,6 +1169,13 @@ def main(argv=None):
     p_run.add_argument("--debug", action="store_true")
     p_run.add_argument("--open-vnc", action="store_true",
                        help="Automatically open VNC viewer after boot (macOS: Screen Sharing)")
+    p_run.add_argument(
+        "--output-dir",
+        help=(
+            "Canonical runtime output root. Defaults to $GYM_ANYTHING_OUTPUT_DIR, "
+            "then the user state directory."
+        ),
+    )
     _add_benchmark_arg(p_run)
     p_run.set_defaults(func=cmd_run)
 
@@ -1180,6 +1196,13 @@ def main(argv=None):
     p_bench.add_argument("--agent", required=True, help="Agent class name (e.g. ClaudeAgent)")
     p_bench.add_argument("--model", help="Model identifier (e.g. claude-opus-4)")
     p_bench.add_argument("--exp-name", help="Experiment name for output directory")
+    p_bench.add_argument(
+        "--output-dir",
+        help=(
+            "Canonical runtime output root. Defaults to $GYM_ANYTHING_OUTPUT_DIR, "
+            "then the user state directory."
+        ),
+    )
     p_bench.add_argument("--steps", type=int, help="Max steps per task (overrides task.json; falls back to task.json, then 50)")
     p_bench.add_argument("--seed", type=int, default=42)
     p_bench.add_argument("--temperature", type=float, help="Sampling temperature")
@@ -1187,7 +1210,7 @@ def main(argv=None):
     p_bench.add_argument("--parallel", "--jobs", type=int, default=1, help="Batch task processes to run at once")
     p_bench.add_argument("--max-tasks", type=int, help="Limit the number of tasks in batch mode")
     p_bench.add_argument("--skip-existing", action="store_true",
-                         help="In batch mode, skip tasks that already have output at all_runs/<exp>/<model>/<task>/run_* (requires --exp-name and --model).")
+                         help="In batch mode, skip tasks that already have output at <output-dir>/all_runs/<exp>/<model>/<task>/run_* (requires --exp-name and --model).")
     p_bench.add_argument("--min-runs", type=int, default=None,
                          help="In batch mode, run each task until it has N completed trajectories (run_*/info.json), then skip it. Drives multi-trajectory sampling with many parallel workers (requires --exp-name and --model).")
     p_bench.add_argument("--surface", choices=("raw", "verified"), default="raw")

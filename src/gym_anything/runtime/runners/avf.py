@@ -94,8 +94,6 @@ class AVFRunner(BaseRunner):
 
     @classmethod
     def doctor_status(cls):
-        from pathlib import Path as _Path
-
         from gym_anything import doctor
         if not doctor._IS_MACOS:
             return {"available": False, "reason": "macOS only", "deps": {}}
@@ -105,7 +103,7 @@ class AVFRunner(BaseRunner):
             "qemu-img": doctor.binary_dep_row("qemu-img"),
             "mkisofs": doctor.binary_dep_row("mkisofs"),
         }
-        base = _Path.home() / ".cache/gym-anything/qemu/avf/base_ubuntu_gnome_arm64.raw"
+        base = AVF_CACHE / "base_ubuntu_gnome_arm64.raw"
         deps["base_image"] = {
             "installed": base.exists(),
             "path": str(base) if base.exists() else None,

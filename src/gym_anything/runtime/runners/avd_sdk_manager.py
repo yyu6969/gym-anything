@@ -22,6 +22,8 @@ import urllib.request
 import sys
 import tempfile
 
+from ...runtime_paths import resolve_cache_root
+
 
 # SDK component URLs and versions
 # Command-line tools: https://developer.android.com/studio#command-tools
@@ -30,7 +32,7 @@ _CMDLINE_TOOLS_PLATFORM = "mac" if sys.platform == "darwin" else "linux"
 CMDLINE_TOOLS_URL = f"https://dl.google.com/android/repository/commandlinetools-{_CMDLINE_TOOLS_PLATFORM}-{CMDLINE_TOOLS_VERSION}_latest.zip"
 
 # Default cache directory
-DEFAULT_CACHE_DIR = Path.home() / ".cache" / "gym-anything"
+DEFAULT_CACHE_DIR = resolve_cache_root()
 
 # Available system image configurations
 SYSTEM_IMAGE_VARIANTS = {

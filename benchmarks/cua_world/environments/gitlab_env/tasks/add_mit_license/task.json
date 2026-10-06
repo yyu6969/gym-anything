@@ -1,0 +1,20 @@
+{
+  "id": "add_mit_license@1",
+  "version": "1.0",
+  "env_id": "gitlab_env@0.1",
+  "description": "Add an MIT license to the 'Byte Blaze / dotfiles' repository.",
+  "init": {
+    "timeout_sec": 300,
+    "max_steps": 40,
+    "reward_type": "sparse"
+  },
+  "hooks": {
+    "pre_task": "'/bin/bash /workspace/tasks/add_mit_license/setup_task.sh'"
+  },
+  "success": {
+    "mode": "program",
+    "spec": {
+      "program": "verifier.py::verify_add_mit_license"
+    }
+  }
+}

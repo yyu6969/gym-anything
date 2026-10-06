@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from ...config.presets import is_android_preset, is_windows_preset
+from ...runtime_paths import reusable_cache_paths
 from ...security import wrap_posix_command_with_env, wrap_powershell_command_with_env
 from ...specs import EnvSpec
 from .base import BaseRunner
@@ -44,7 +45,7 @@ from .vnc_utils import VNCConnectionPool
 from .windows_pyautogui_client import PyAutoGUIClient, PyAutoGUIClientError
 
 # Configuration via environment variables
-QEMU_CACHE = Path(os.environ.get("GYM_ANYTHING_QEMU_CACHE", os.path.expanduser("~/.cache/gym-anything/qemu")))
+QEMU_CACHE = reusable_cache_paths().qemu
 QEMU_CONTAINER = os.environ.get("GYM_ANYTHING_QEMU_CONTAINER", "docker://ghcr.io/dockur/windows:latest")
 BASE_QCOW2_URL = os.environ.get("GYM_ANYTHING_BASE_QCOW2", "")  # URL to download base image
 # Work directory for instance overlays (defaults to QEMU_CACHE/work if not set)

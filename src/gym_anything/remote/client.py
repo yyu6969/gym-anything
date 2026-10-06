@@ -45,6 +45,7 @@ _DEFAULT_RETRY_MAX_SEC = float(os.environ.get("GYM_ANYTHING_REMOTE_RETRY_MAX_SEC
 
 from gym_anything.contracts import SessionInfo
 from gym_anything.config.loading import _load_envspec, _load_taskspec
+from gym_anything.runtime_paths import reusable_cache_paths
 from gym_anything.specs import EnvSpec, TaskSpec
 from gym_anything.utils.yaml import load_structured_file
 
@@ -163,7 +164,7 @@ class RemoteGymEnv:
         
     def _setup_cache(self):
         """Setup local cache directory for downloaded files."""
-        cache_root = Path.home() / ".gym_anything_cache"
+        cache_root = reusable_cache_paths().remote
         cache_root.mkdir(parents=True, exist_ok=True)
         
         self._cache_dir = cache_root / self.env_id

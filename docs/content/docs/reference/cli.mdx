@@ -21,7 +21,7 @@ Examples:
 
 ```bash
 gym-anything run moodle --task enroll_student -i
-gym-anything run benchmarks/cua_world/environments/moodle_env --task enroll_student
+gym-anything run benchmarks/cua_world/environments/moodle_env --task enroll_student --output-dir /path/to/output
 ```
 
 Important flags:
@@ -31,6 +31,7 @@ Important flags:
 - `--steps`: number of steps in non-interactive mode
 - `--seed`: reset seed
 - `--open-vnc`: open a VNC viewer in interactive mode
+- `--output-dir`: canonical root for recordings and run-specific state
 
 <Callout type="info">
 If you pass a short environment name such as `moodle`, the CLI resolves it against `benchmarks/cua_world/environments/`. If you don't pass `--task`, the CLI picks a random task from that environment.
@@ -43,7 +44,7 @@ Run an agent on benchmark tasks. This is the main way to evaluate agents.
 Single task:
 
 ```bash
-gym-anything benchmark moodle --task enroll_student --agent ClaudeAgent --model claude-opus-4
+gym-anything benchmark moodle --task enroll_student --agent ClaudeAgent --model claude-opus-4 --output-dir /path/to/output
 ```
 
 All tasks in an environment:
@@ -63,6 +64,8 @@ Important flags:
 - `--agent` (required): agent class name (e.g. `ClaudeAgent`)
 - `--task`: task ID. Omit to run all tasks in the split (batch mode)
 - `--model`: model identifier (e.g. `claude-opus-4`)
+- `--output-dir`: canonical root for episode artifacts, agent runs, model dumps,
+  and run-specific state
 - `--steps`: max steps per task (default: 50)
 - `--split`: task split for batch mode (default: `test`). Use `disk` to run every task folder on disk, ignoring split files
 - `--parallel`, `--jobs`: batch task processes to run at once
@@ -75,7 +78,8 @@ Important flags:
 - `--post-step-observation-delay`: seconds to wait after each `env.step` before
   refreshing the observation that goes to the next model turn
 - `--timing-jsonl`: choose the per-iteration timing log path for a single-task
-  run; otherwise it is written under the episode directory
+  run; relative paths are beneath `--output-dir`, and absolute paths must also
+  stay beneath it. Otherwise the log is written under the episode directory
 - `--semantic_traj_apply PATH`: enforce a semantic trajectory JSON for a
   `Gemini3Agent` single-task run; only the active semantic step is exposed to
   the agent, and the existing task verifier still decides PASS/FAIL
@@ -89,6 +93,58 @@ Important flags:
 <Callout type="info">
 When `--task` is omitted, the CLI enters batch mode and runs all tasks for the given environment and split. Each task runs in its own process for fault isolation.
 </Callout>
+
+## Runtime output layout
+
+Both `run` and `benchmark` resolve one output root in this order:
+
+1. `--output-dir`
+2. `GYM_ANYTHING_OUTPUT_DIR`
+3. `$XDG_STATE_HOME/gym-anything`, or `~/.local/state/gym-anything`
+
+Relative explicit paths are resolved against the invocation working directory.
+Benchmark definitions remain in the benchmark package or source checkout and
+are never copied into the output root.
+
+Runtime components retain their existing internal names beneath the root:
+
+```text
+<output-dir>/
+  artifacts/             # episode recordings, trajectories, and summaries
+  all_runs/              # reference-agent observations and responses
+  model_usage_dumps/     # provider usage objects, when emitted
+  log_dumps_claude/      # raw Claude responses, when emitted
+  state/                 # local monitoring state
+  work/                  # ephemeral dependency work, when needed
+```
+
+Heavyweight reusable caches are machine-level and do not change when
+`--output-dir` changes. Their precedence is:
+
+1. the component-specific variable;
+2. `GYM_ANYTHING_CACHE_DIR` plus the component subdirectory;
+3. the stable machine-cache default.
+
+| Cache | Component-specific variable | Default |
+| --- | --- | --- |
+| QEMU base images and checkpoints | `GYM_ANYTHING_QEMU_CACHE` | `~/.cache/gym-anything/qemu` |
+| Gym-managed Apptainer SIFs | `GYM_ANYTHING_APPTAINER_CACHE` | `~/.cache/gym-anything/apptainer` |
+| AVD checkpoints | `GYM_ANYTHING_AVD_CHECKPOINT_CACHE` | `~/.cache/gym-anything/avd-checkpoints` |
+| AVD container images | `GYM_ANYTHING_AVD_CONTAINER_CACHE` | `~/.cache/gym-anything/containers` |
+| Agent sandbox images | `GYM_ANYTHING_AGENT_SANDBOX_CACHE` | `~/.cache/gym-anything/agent-sandbox` |
+| Remote downloads | `GYM_ANYTHING_REMOTE_CACHE` | `~/.gym_anything_cache` |
+| Sandweave installation/assets | `SANDWEAVE_HOME` | `~/.cache/gym-anything/sandweave` |
+
+Gym supplies a shared machine default for `SANDWEAVE_HOME` so Sandweave does
+not fall back to a CWD-local project installation. An explicitly configured
+`SANDWEAVE_HOME` still wins.
+
+`GYM_ANYTHING_QEMU_WORK_DIR` remains an explicit override for disposable QEMU
+overlays; without it, Gym retains its historical `<QEMU cache>/work` location.
+Fast-I/O work uses `GYM_ANYTHING_FAST_IO_WORK_DIR`, then the system temporary
+directory when usable. `SANDWEAVE_LOCAL_DIR` is run-specific and defaults to
+`<output-dir>/work/sandweave-local`. Apptainer's own blob cache continues to
+honor `APPTAINER_CACHEDIR`; Gym does not overwrite it.
 
 Remote benchmark example:
 

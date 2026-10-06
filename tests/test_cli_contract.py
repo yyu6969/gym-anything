@@ -22,6 +22,7 @@ class CliContractTests(unittest.TestCase):
             interactive=True,
             seed=42,
             open_vnc=False,
+            output_dir="/tmp/gym-anything-cli-contract",
         )
 
         with mock.patch.object(cli, "_pick_random_task", return_value="demo_task"), \
@@ -34,6 +35,11 @@ class CliContractTests(unittest.TestCase):
         mock_from_config.assert_called_once_with(
             "benchmarks/cua_world/environments/moodle_env",
             task_id="demo_task",
+            overrides={
+                "recording": {
+                    "output_dir": "/tmp/gym-anything-cli-contract/artifacts",
+                }
+            },
         )
         env.set_reporter.assert_called_once_with(reporter)
         env.reset.assert_called_once_with(seed=42)
@@ -58,6 +64,7 @@ class CliContractTests(unittest.TestCase):
             remote_url="http://127.0.0.1:5800",
             remote_timeout=123,
             remote_worker_reset_policy="core",
+            output_dir="/tmp/gym-anything-test-output",
             agent_arg=[],
             parallel=2,
             max_tasks=3,
@@ -91,6 +98,8 @@ class CliContractTests(unittest.TestCase):
         self.assertIn("--task task_c", command_text)
         self.assertNotIn("--task task_d", command_text)
         for command in commands:
+            self.assertIn("--output-dir", command)
+            self.assertIn("/tmp/gym-anything-test-output", command)
             self.assertIn("--remote-url", command)
             self.assertIn("http://127.0.0.1:5800", command)
             self.assertIn("--remote-timeout", command)

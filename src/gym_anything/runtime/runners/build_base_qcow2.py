@@ -28,6 +28,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ...runtime_paths import reusable_cache_paths
+
 
 def check_docker():
     """Check if Docker is available."""
@@ -172,7 +174,7 @@ def main():
     parser.add_argument("--preset", default="ubuntu-gnome-systemd_highres_gimp", 
                        help="Preset name to build (default: ubuntu-gnome-systemd_highres_gimp)")
     parser.add_argument("--output", "-o", 
-                       default=str(Path.home() / ".cache/gym-anything/qemu/base_ubuntu_gnome.qcow2"),
+                       default=str(reusable_cache_paths().qemu / "base_ubuntu_gnome.qcow2"),
                        help="Output QCOW2 path")
     parser.add_argument("--size", default="50G", help="Disk size (default: 50G)")
     

@@ -14,10 +14,10 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from agents.shared.prompts import CLAUDE_SYSTEM_PROMPT
+from gym_anything.runtime_paths import runtime_paths
 
 load_dotenv()
 
-LOG_DUMPS = "log_dumps_claude"
 logger = logging.getLogger(__name__)
 
 
@@ -81,7 +81,7 @@ def call_kimi_azure(
                 temperature=temperature,
                 top_p=top_p,
             )
-            _dump_usage("model_usage_dumps", model, response.usage)
+            _dump_usage(str(runtime_paths().model_usage_dumps), model, response.usage)
             if return_full_response:
                 return response
 
@@ -181,7 +181,7 @@ def call_gemini_with_retry(
                 reasoning_effort=reasoning_effort,
                 timeout=timeout,
             )
-            _dump_usage("model_usage_dumps", model, response.usage)
+            _dump_usage(str(runtime_paths().model_usage_dumps), model, response.usage)
             if return_full_response:
                 return response
 
@@ -328,8 +328,9 @@ def call_claude(
     )
 
     try:
-        os.makedirs(LOG_DUMPS, exist_ok=True)
-        with open(f"{LOG_DUMPS}/{uuid.uuid4()}.pkl", "wb") as handle:
+        log_dumps = runtime_paths().model_response_dumps
+        os.makedirs(log_dumps, exist_ok=True)
+        with open(log_dumps / f"{uuid.uuid4()}.pkl", "wb") as handle:
             pickle.dump(response, handle)
     except Exception as exc:
         print(f"Error dumping response: {exc}")

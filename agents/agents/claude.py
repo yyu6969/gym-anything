@@ -2,6 +2,7 @@ from agents.agents.base import BaseAgent
 from agents.shared.prompts import CLAUDE_SYSTEM_PROMPT, CLAUDE_SYSTEM_PROMPT_CAREFUL
 from agents.shared.llm_clients import call_claude, claude_parse_tool_result
 from agents.shared.message_cache import add_cache_blocks
+from agents.shared.output_paths import agent_run_base
 from PIL import Image
 import base64
 from pathlib import Path
@@ -15,7 +16,7 @@ class ClaudeAgent(BaseAgent):
 
     def setup_custom_logger(self):
         task_name = self.agent_args.get('task_name', 'task')
-        self.save_folder_custom = f'all_runs/{self.exp_name}/{self.model}/{task_name}'
+        self.save_folder_custom = agent_run_base(self.exp_name, self.model, task_name)
         for run_number in range(0, 100):
             if os.path.exists(f'{self.save_folder_custom}/run_{run_number}'):
                 continue

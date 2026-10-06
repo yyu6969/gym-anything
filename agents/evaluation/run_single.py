@@ -19,6 +19,11 @@ from agents.evaluation.semantic_trajectory import (
 )
 from gym_anything.api import from_config
 from gym_anything.remote import RemoteGymEnv
+from gym_anything.runtime_paths import (
+    configure_runtime_paths,
+    resolve_runtime_file,
+    runtime_paths,
+)
 from tqdm import tqdm
 
 
@@ -48,6 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task", type=str, required=True)
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--agent", type=str, required=True)
+    parser.add_argument(
+        "--output_dir",
+        "--output-dir",
+        default=None,
+        help="Canonical runtime output root.",
+    )
     parser.add_argument(
         "--agent_args",
         type=str,
@@ -203,7 +214,16 @@ def _make_env(args: argparse.Namespace):
     fast_io = bool(getattr(args, "fast_io", False))
     remote_url = getattr(args, "remote_url", None)
     if not remote_url:
-        return from_config(args.env_dir, task_id=args.task, fast_io=fast_io)
+        return from_config(
+            args.env_dir,
+            task_id=args.task,
+            overrides={
+                "recording": {
+                    "output_dir": str(runtime_paths().artifacts),
+                }
+            },
+            fast_io=fast_io,
+        )
     worker_reset_policy = getattr(args, "remote_worker_reset_policy", "core")
     if worker_reset_policy == "none":
         worker_reset_policy = None
@@ -350,6 +370,7 @@ def _check_semantic_step(
 
 
 def run_single(args: argparse.Namespace) -> int:
+    configure_runtime_paths(getattr(args, "output_dir", None))
     _apply_vlm_settings(args)
     _apply_verifier_settings(args)
 
@@ -388,7 +409,12 @@ def run_single(args: argparse.Namespace) -> int:
         return 1
 
     logger.info("Episode started. Artifacts will be saved under: %s", env.episode_dir)
-    timing_path = Path(getattr(args, "timing_jsonl", None) or Path(env.episode_dir) / "timing.jsonl")
+    requested_timing_path = getattr(args, "timing_jsonl", None)
+    timing_path = (
+        resolve_runtime_file(requested_timing_path)
+        if requested_timing_path
+        else Path(env.episode_dir) / "timing.jsonl"
+    )
     _write_timing_record(
         timing_path,
         {

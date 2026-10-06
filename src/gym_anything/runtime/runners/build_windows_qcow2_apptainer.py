@@ -33,7 +33,9 @@ import time
 from pathlib import Path
 from typing import Optional
 
-QEMU_CACHE = Path(os.environ.get("GYM_ANYTHING_QEMU_CACHE", "~/.cache/gym-anything/qemu")).expanduser()
+from ...runtime_paths import reusable_cache_paths
+
+QEMU_CACHE = reusable_cache_paths().qemu
 WINDOWS_CONTAINER = "docker://ghcr.io/dockur/windows:latest"
 VIRTIO_WIN_URL = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
 

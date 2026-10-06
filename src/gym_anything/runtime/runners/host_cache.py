@@ -12,41 +12,44 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List
 
-CACHE_ROOT = Path.home() / ".cache" / "gym-anything"
+from ...runtime_paths import reusable_cache_paths
 
-# Base files/dirs inside qemu/ that are expensive to rebuild.
-# Anything else in qemu/ (and qemu/avf/) is treated as work.
-QEMU_BASE_NAMES = {
-    "base_ubuntu_gnome_arm64.qcow2",
-    "base_ubuntu_gnome_arm64.raw",
-    "base_ubuntu_gnome.qcow2",
-    "ubuntu-cloud-arm64.img",
-    "ubuntu-cloud.img",
-}
+_QEMU_WORK_NAMES = {"work", "last_provision.log"}
+
+
+def _is_qemu_work(path: Path) -> bool:
+    return path.name in _QEMU_WORK_NAMES or path.suffix == ".lock"
 
 
 def _qemu_work_paths() -> List[Path]:
-    qemu = CACHE_ROOT / "qemu"
+    qemu = reusable_cache_paths().qemu
     if not qemu.exists():
         return []
     paths: List[Path] = []
     for entry in qemu.iterdir():
-        if entry.name in QEMU_BASE_NAMES:
+        if _is_qemu_work(entry):
+            paths.append(entry)
             continue
         if entry.name == "avf":
             for sub in entry.iterdir():
-                if sub.name not in QEMU_BASE_NAMES:
+                if _is_qemu_work(sub):
                     paths.append(sub)
-            continue
-        paths.append(entry)
     return paths
 
 
 def _qemu_base_paths() -> List[Path]:
-    qemu = CACHE_ROOT / "qemu"
+    qemu = reusable_cache_paths().qemu
     if not qemu.exists():
         return []
-    return [p for p in qemu.rglob("*") if p.name in QEMU_BASE_NAMES and p.is_file()]
+    paths: List[Path] = []
+    for entry in qemu.iterdir():
+        if _is_qemu_work(entry):
+            continue
+        if entry.name == "avf":
+            paths.extend(sub for sub in entry.iterdir() if not _is_qemu_work(sub))
+            continue
+        paths.append(entry)
+    return paths
 
 
 def qemu_components() -> List[Dict]:
@@ -54,32 +57,35 @@ def qemu_components() -> List[Dict]:
         {"name": "qemu-work", "category": "work", "paths": _qemu_work_paths(),
          "desc": "QEMU/AVF work directories and COW overlays (per-run state)"},
         {"name": "qemu-base", "category": "base", "paths": _qemu_base_paths(),
-         "desc": "QEMU/AVF base VM images (~5 min to rebuild)"},
+         "desc": "QEMU/AVF base images, checkpoints, and reusable downloads"},
     ]
 
 
 def apptainer_components() -> List[Dict]:
+    caches = reusable_cache_paths()
     return [
-        {"name": "apptainer", "category": "work", "paths": [CACHE_ROOT / "apptainer"],
-         "desc": "Apptainer SIF images and overlays"},
+        {"name": "apptainer", "category": "base", "paths": [caches.apptainer],
+         "desc": "Reusable Apptainer SIF images"},
     ]
 
 
 def avd_components() -> List[Dict]:
+    caches = reusable_cache_paths()
     return [
-        {"name": "avd-checkpoints", "category": "work", "paths": [CACHE_ROOT / "avd-checkpoints"],
+        {"name": "avd-checkpoints", "category": "base", "paths": [caches.avd_checkpoints],
          "desc": "AVD checkpoint snapshots"},
-        {"name": "android-sdk", "category": "base", "paths": [CACHE_ROOT / "android-sdk"],
+        {"name": "android-sdk", "category": "base", "paths": [caches.root / "android-sdk"],
          "desc": "Android SDK (requires network to re-download)"},
-        {"name": "apks", "category": "base", "paths": [CACHE_ROOT / "apks"],
+        {"name": "apks", "category": "base", "paths": [caches.root / "apks"],
          "desc": "Downloaded Android APKs"},
-        {"name": "avd", "category": "base", "paths": [CACHE_ROOT / "avd"],
+        {"name": "avd", "category": "base", "paths": [caches.root / "avd"],
          "desc": "Android Virtual Device definitions"},
     ]
 
 
 def container_components() -> List[Dict]:
+    caches = reusable_cache_paths()
     return [
-        {"name": "containers", "category": "work", "paths": [CACHE_ROOT / "containers"],
-         "desc": "Container runtime cache"},
+        {"name": "containers", "category": "base", "paths": [caches.containers],
+         "desc": "Reusable container runtime images"},
     ]

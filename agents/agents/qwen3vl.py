@@ -1,6 +1,7 @@
 from agents.agents.base import BaseAgent
 from agents.shared.drivable import DrivableAgentMixin
 from agents.shared.llm_clients import call_llm, smart_resize, parse_qwen3vl_response
+from agents.shared.output_paths import agent_run_base
 from PIL import Image
 import json
 import os
@@ -66,7 +67,7 @@ class Qwen3VLAgent(DrivableAgentMixin, BaseAgent):
     def setup_custom_logger(self):
         """Setup custom save folder for agent artifacts."""
         task_name = self.agent_args.get('task_name', 'task')
-        self.save_folder_custom = f'all_runs/{self.exp_name}/{self.model}/{task_name}'
+        self.save_folder_custom = agent_run_base(self.exp_name, self.model, task_name)
         for run_number in range(0, 1000):
             if os.path.exists(f'{self.save_folder_custom}/run_{run_number}'):
                 continue

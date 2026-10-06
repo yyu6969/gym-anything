@@ -33,15 +33,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...specs import EnvSpec
+from ...runtime_paths import reusable_cache_paths
 from .base import BaseRunner
 from .vnc_utils import VNCConnectionPool
 
 
 # Configuration via environment variables
-APPTAINER_CACHE = Path(os.environ.get(
-    "GYM_ANYTHING_APPTAINER_CACHE",
-    "~/.cache/gym-anything/apptainer"
-)).expanduser()
+APPTAINER_CACHE = reusable_cache_paths().apptainer
 
 # Lock file for port allocation
 PORT_LOCK_FILE = APPTAINER_CACHE / ".port_lock"

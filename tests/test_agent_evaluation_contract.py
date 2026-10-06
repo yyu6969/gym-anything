@@ -116,6 +116,7 @@ class AgentEvaluationContractTests(unittest.TestCase):
                 remote_url=None,
                 remote_timeout=300,
                 remote_worker_reset_policy="core",
+                output_dir=str(Path(tmp) / "output"),
             )
 
             with mock.patch.object(run_single_module, "from_config", return_value=fake_env), \
@@ -259,6 +260,7 @@ class AgentEvaluationContractTests(unittest.TestCase):
                 remote_url=None,
                 remote_timeout=300,
                 remote_worker_reset_policy="core",
+                output_dir=str(Path(tmp) / "output"),
             )
 
             with mock.patch.object(run_single_module, "from_config", return_value=fake_env) as make_env, \
@@ -269,7 +271,16 @@ class AgentEvaluationContractTests(unittest.TestCase):
                 self.assertEqual(os.environ["VLM_DISABLE_THINKING"], "1")
 
             self.assertEqual(result, 0)
-            make_env.assert_called_once_with("demo-env", task_id="demo-task", fast_io=True)
+            make_env.assert_called_once_with(
+                "demo-env",
+                task_id="demo-task",
+                overrides={
+                    "recording": {
+                        "output_dir": str(Path(tmp) / "output" / "artifacts"),
+                    }
+                },
+                fast_io=True,
+            )
             timing_path = Path(tmp) / "timing.jsonl"
             summary_path = Path(tmp) / "timing_summary.json"
             self.assertTrue(timing_path.exists())
