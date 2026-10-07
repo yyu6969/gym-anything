@@ -605,6 +605,49 @@ class CodexSessionTests(unittest.TestCase):
         self.assertEqual(audit_run_call.kwargs["session_id"], "auditor-session")
         self.assertTrue(audit_run_call.kwargs["resume"])
 
+    def test_structural_validation_runs_before_audit_rounds(self):
+        events = []
+
+        def invoke(*args, **kwargs):
+            del args, kwargs
+            events.append("agent")
+
+        def validate():
+            events.append("structural-validation")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                mock.patch.object(ca, "_resolve_bin", return_value=Path("/tmp/codex")),
+                mock.patch.object(
+                    ca,
+                    "_codex_new_session",
+                    return_value="auditor-session",
+                ),
+                mock.patch.object(ca, "_codex_invoke", side_effect=invoke),
+            ):
+                ca.run_creation_audit(
+                    software="GitLab",
+                    env_dir="gitlab_env",
+                    backend="codex",
+                    platform="linux",
+                    blind_nudges=0,
+                    audit_rounds=1,
+                    start_idx=0,
+                    session_id="creator-session",
+                    workspace=root,
+                    memory_dir=ca._packaged_memory_dir(),
+                    audits_dir=root / "audits",
+                    logs_dir=root / "logs",
+                    claude_bin=None,
+                    codex_bin=None,
+                    timeout_sec=60,
+                    pre_audit_validation=validate,
+                )
+
+        self.assertEqual(events[:2], ["agent", "structural-validation"])
+        self.assertEqual(events.count("agent"), 3)
+
     def test_pipeline_passes_and_logs_aab_context_separately(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

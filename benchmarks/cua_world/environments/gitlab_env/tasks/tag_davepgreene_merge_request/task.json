@@ -1,0 +1,20 @@
+{
+  "id": "tag_davepgreene_merge_request@1",
+  "version": "1.0",
+  "env_id": "gitlab_env@0.1",
+  "description": "Tag @davepgreene in the 'Add verification functions' merge request assigned to me.",
+  "init": {
+    "timeout_sec": 300,
+    "max_steps": 30,
+    "reward_type": "sparse"
+  },
+  "hooks": {
+    "pre_task": "'/bin/bash /workspace/tasks/tag_davepgreene_merge_request/setup_task.sh'"
+  },
+  "success": {
+    "mode": "program",
+    "spec": {
+      "program": "verifier.py::verify_tag_davepgreene_merge_request"
+    }
+  }
+}

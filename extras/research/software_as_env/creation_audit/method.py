@@ -43,12 +43,14 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Sequence
 
 DEFAULT_TIMEOUT_SEC = 7200  # 2 hours per agent invocation
 DISALLOWED_TOOLS = "AskUserQuestion,EnterPlanMode,ExitPlanMode,Task(Plan)"
 DEFAULT_BLIND_NUDGES = 1
 DEFAULT_AUDIT_ROUNDS = 2
+CREATE_NEW_ENVIRONMENT = "CREATE_NEW_ENVIRONMENT"
+EXTEND_EXISTING_ENVIRONMENT = "EXTEND_EXISTING_ENVIRONMENT"
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +387,7 @@ def _aab_context_prompt(
     environment_spec: dict[str, Any] | None,
     environment_initial_state: dict[str, Any] | None,
     audit: bool,
+    creation_mode: str | None = None,
 ) -> str:
     if (
         task_instruction is None
@@ -398,10 +401,16 @@ def _aab_context_prompt(
     if task_instruction is not None:
         sections.append(f"Task instruction: >>>\n{task_instruction}\n<<<")
     if video is not None:
+        video_objective = (
+            "Extend the cloned shared environment so the demonstrated new task can "
+            "be successfully executed without regressing any existing task."
+            if creation_mode == EXTEND_EXISTING_ENVIRONMENT
+            else "Reconstruct an environment in which the demonstrated task can be "
+            "successfully executed."
+        )
         sections.append(
             f"Video: >>>\n@{video.as_posix()}\n<<<\n\n"
-            "Reconstruct an environment in which the demonstrated task can be "
-            "successfully executed.\n\n"
+            f"{video_objective}\n\n"
             "Use the video as the primary evidence for:\n"
             "- application/software\n"
             "- task-relevant UI state\n"
@@ -492,6 +501,75 @@ def _aab_context_prompt(
     )
 
 
+def _operation_mode_prompt(
+    *,
+    creation_mode: str | None,
+    canonical_environment_id: str | None,
+    protected_task_names: Sequence[str],
+    task_instruction: str | None,
+) -> str:
+    """Render the create-versus-extend contract for the creation backend."""
+
+    if creation_mode is None:
+        return ""
+    if creation_mode == CREATE_NEW_ENVIRONMENT:
+        return (
+            "\n\n## Backend Operation Mode\n\n"
+            f"Mode: {CREATE_NEW_ENVIRONMENT}\n\n"
+            "The target directory is staging for a new canonical persistent shared "
+            "environment. Create the environment and its first task there. Use the "
+            "software-level environment name supplied above; do not invent a "
+            "task-specific environment identity."
+        )
+    if creation_mode != EXTEND_EXISTING_ENVIRONMENT:
+        raise ValueError(f"Unknown creation_mode: {creation_mode!r}")
+    if not isinstance(canonical_environment_id, str) or not canonical_environment_id:
+        raise ValueError(
+            "canonical_environment_id is required in EXTEND_EXISTING_ENVIRONMENT mode"
+        )
+    if task_instruction is None:
+        raise ValueError(
+            "task_instruction is required in EXTEND_EXISTING_ENVIRONMENT mode"
+        )
+
+    protected = (
+        "\n".join(f"- {name}" for name in protected_task_names)
+        if protected_task_names
+        else "- (none)"
+    )
+    expected = "\n".join(
+        [
+            "tasks/",
+            *(f"    {name}/" for name in protected_task_names),
+            "    <new-task-directory-for-the-requested-task>/",
+        ]
+    )
+    return (
+        "\n\n## Backend Operation Mode\n\n"
+        f"Mode: {EXTEND_EXISTING_ENVIRONMENT}\n\n"
+        "This target directory is already a clone of the canonical persistent "
+        "shared environment. You are extending the existing shared environment.\n\n"
+        "Do NOT create a new environment. Do NOT change the environment identity. "
+        "Do NOT delete, rename, move, replace, or modify pre-existing task "
+        "directories. Do NOT treat existing tasks, assets, scripts, configuration, "
+        "or seed data as stale reconstruction output. Add support for the new task "
+        "while preserving support for all existing tasks.\n\n"
+        f"Canonical environment ID: {canonical_environment_id}\n\n"
+        "Existing protected tasks (byte-for-byte immutable):\n"
+        f"{protected}\n\n"
+        "New requested task: >>>\n"
+        f"{task_instruction}\n"
+        "<<<\n\n"
+        "Expected final task structure:\n"
+        f"{expected}\n\n"
+        "Create exactly one new task directory for the requested task. Its task.json "
+        "must preserve the requested instruction and use the canonical environment "
+        "ID above as env_id. You MAY update shared environment implementation and "
+        "state when necessary, including env.json fields other than id, scripts/, "
+        "config/, assets/, shared seed data, and environment hooks."
+    )
+
+
 def _resolve_context_software(
     software: str | None, environment_spec: dict[str, Any] | None
 ) -> str:
@@ -518,6 +596,9 @@ def _initial_prompt(
     workspace: Path | None = None,
     environment_dir: Path | None = None,
     video: Path | None = None,
+    creation_mode: str | None = None,
+    canonical_environment_id: str | None = None,
+    protected_task_names: Sequence[str] = (),
 ) -> str:
     target = environment_dir.as_posix() if environment_dir is not None else env_dir
     prompt = (
@@ -536,6 +617,13 @@ def _initial_prompt(
             environment_spec=environment_spec,
             environment_initial_state=environment_initial_state,
             audit=False,
+            creation_mode=creation_mode,
+        )
+        + _operation_mode_prompt(
+            creation_mode=creation_mode,
+            canonical_environment_id=canonical_environment_id,
+            protected_task_names=protected_task_names,
+            task_instruction=task_instruction,
         )
         + _path_context_prompt(
             reference_root=reference_root,
@@ -556,6 +644,9 @@ def _nudge_prompt(
     workspace: Path | None = None,
     environment_dir: Path | None = None,
     video: Path | None = None,
+    creation_mode: str | None = None,
+    canonical_environment_id: str | None = None,
+    protected_task_names: Sequence[str] = (),
 ) -> str:
     prompt = (
         f"reread @{_creation_prompt_path(memory_dir, platform)}. "
@@ -577,7 +668,16 @@ def _nudge_prompt(
             environment_initial_state,
         )
     ):
-        return prompt + path_context
+        return (
+            prompt
+            + _operation_mode_prompt(
+                creation_mode=creation_mode,
+                canonical_environment_id=canonical_environment_id,
+                protected_task_names=protected_task_names,
+                task_instruction=task_instruction,
+            )
+            + path_context
+        )
     return (
         prompt
         + _aab_context_prompt(
@@ -587,6 +687,13 @@ def _nudge_prompt(
             environment_spec=environment_spec,
             environment_initial_state=environment_initial_state,
             audit=False,
+            creation_mode=creation_mode,
+        )
+        + _operation_mode_prompt(
+            creation_mode=creation_mode,
+            canonical_environment_id=canonical_environment_id,
+            protected_task_names=protected_task_names,
+            task_instruction=task_instruction,
         )
         + path_context
     )
@@ -622,6 +729,9 @@ def _audit_run_prompt(
     workspace: Path | None = None,
     environment_dir: Path | None = None,
     video: Path | None = None,
+    creation_mode: str | None = None,
+    canonical_environment_id: str | None = None,
+    protected_task_names: Sequence[str] = (),
 ) -> str:
     audit_file_rel = (audits_dir / f"audit_{env_dir}.md").as_posix()
     target_dir = (
@@ -648,7 +758,16 @@ def _audit_run_prompt(
             environment_initial_state,
         )
     ):
-        return prompt + path_context
+        return (
+            prompt
+            + _operation_mode_prompt(
+                creation_mode=creation_mode,
+                canonical_environment_id=canonical_environment_id,
+                protected_task_names=protected_task_names,
+                task_instruction=task_instruction,
+            )
+            + path_context
+        )
     return (
         prompt
         + _aab_context_prompt(
@@ -658,6 +777,13 @@ def _audit_run_prompt(
             environment_spec=environment_spec,
             environment_initial_state=environment_initial_state,
             audit=True,
+            creation_mode=creation_mode,
+        )
+        + _operation_mode_prompt(
+            creation_mode=creation_mode,
+            canonical_environment_id=canonical_environment_id,
+            protected_task_names=protected_task_names,
+            task_instruction=task_instruction,
         )
         + path_context
     )
@@ -673,6 +799,9 @@ def _audit_feedback_prompt(
     workspace: Path | None = None,
     environment_dir: Path | None = None,
     video: Path | None = None,
+    creation_mode: str | None = None,
+    canonical_environment_id: str | None = None,
+    protected_task_names: Sequence[str] = (),
 ) -> str:
     prompt = (
         f"An independent audit of your progress was performed. Here is the "
@@ -694,7 +823,16 @@ def _audit_feedback_prompt(
             environment_initial_state,
         )
     ):
-        return prompt + path_context
+        return (
+            prompt
+            + _operation_mode_prompt(
+                creation_mode=creation_mode,
+                canonical_environment_id=canonical_environment_id,
+                protected_task_names=protected_task_names,
+                task_instruction=task_instruction,
+            )
+            + path_context
+        )
     return (
         prompt
         + _aab_context_prompt(
@@ -704,6 +842,13 @@ def _audit_feedback_prompt(
             environment_spec=environment_spec,
             environment_initial_state=environment_initial_state,
             audit=False,
+            creation_mode=creation_mode,
+        )
+        + _operation_mode_prompt(
+            creation_mode=creation_mode,
+            canonical_environment_id=canonical_environment_id,
+            protected_task_names=protected_task_names,
+            task_instruction=task_instruction,
         )
         + path_context
     )
@@ -735,6 +880,10 @@ def run_creation_audit(
     environment_initial_state_path: Path | None = None,
     reference_root: Path | None = None,
     environment_dir: Path | None = None,
+    creation_mode: str | None = None,
+    canonical_environment_id: str | None = None,
+    protected_task_names: Sequence[str] = (),
+    pre_audit_validation: Callable[[], None] | None = None,
 ) -> int:
     if platform not in SUPPORTED_PLATFORMS:
         raise ValueError(
@@ -769,6 +918,15 @@ def run_creation_audit(
         "workspace": workspace if explicit_path_layout else None,
         "environment_dir": resolved_environment_dir if explicit_path_layout else None,
     }
+    operation_context = {
+        "creation_mode": creation_mode,
+        "canonical_environment_id": canonical_environment_id,
+        "protected_task_names": tuple(protected_task_names),
+    }
+    _operation_mode_prompt(
+        **operation_context,
+        task_instruction=task_instruction,
+    )
 
     if backend == "cc":
         binary = _resolve_bin(claude_bin, "CLAUDE_BIN", "claude")
@@ -823,6 +981,12 @@ def run_creation_audit(
         log_text += f"Task Instruction Source: {task_instruction_path}\n"
     if task_instruction is not None:
         log_text += f"Task Instruction:\n{task_instruction}\n"
+    if creation_mode is not None:
+        log_text += f"Creation Mode: {creation_mode}\n"
+    if canonical_environment_id is not None:
+        log_text += f"Canonical Environment ID: {canonical_environment_id}\n"
+    if protected_task_names:
+        log_text += "Protected Tasks: " + ", ".join(protected_task_names) + "\n"
     if video_path is not None:
         log_text += f"Video Source: {video_path}\n"
     if environment_spec_path is not None:
@@ -872,6 +1036,7 @@ def run_creation_audit(
                 task_instruction,
                 environment_initial_state,
                 video=video_path,
+                **operation_context,
                 **prompt_paths,
             ),
             # Codex cannot accept a caller-selected session id for a fresh exec.
@@ -900,11 +1065,17 @@ def run_creation_audit(
                 environment_initial_state,
                 software,
                 video=video_path,
+                **operation_context,
                 **prompt_paths,
             ),
             resume=True,
         )
         append_log(f"Blind Nudge {phase_idx} Completed")
+
+    if pre_audit_validation is not None:
+        print("\n=== Candidate Structural Validation ===")
+        pre_audit_validation()
+        append_log("Candidate Structural Validation Completed")
 
     # Phase 3: audit rounds with feedback
     for i in range(audit_rounds):
@@ -937,6 +1108,7 @@ def run_creation_audit(
                     environment_initial_state,
                     software,
                     video=video_path,
+                    **operation_context,
                     **prompt_paths,
                 ),
                 session_id=audit_session,
@@ -966,6 +1138,7 @@ def run_creation_audit(
                     environment_initial_state,
                     software,
                     video=video_path,
+                    **operation_context,
                     **prompt_paths,
                 ),
                 session_id=audit_session,
@@ -990,6 +1163,7 @@ def run_creation_audit(
                 environment_initial_state,
                 software,
                 video=video_path,
+                **operation_context,
                 **prompt_paths,
             ),
             resume=True,
