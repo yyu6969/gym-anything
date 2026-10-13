@@ -32,7 +32,8 @@ GEMINI_SYSTEM_PROMPT_SINGLE_STEP = """<SYSTEM_CAPABILITY>
 * If you want to run a specific gui application, make sure to set the display variable to :1.
 * When using your computer function calls, they take a while to run and send back to you.
 * Enclose your tool call inside <tool_call></tool_call> tags.
-* Important: Only use one tool call per turn.
+* Return exactly one tool call per response. Additional calls are ignored; wait for a fresh screenshot before choosing the next action.
+* Return `terminate` alone, only after a screenshot confirms completion. Never combine it with GUI actions or a wait.
 
 You have access to the following tools:
 <<TOOL_DEFINITIONS>>

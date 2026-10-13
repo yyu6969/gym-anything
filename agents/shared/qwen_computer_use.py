@@ -18,8 +18,102 @@ action record — and bounds context via screenshot pruning
 from __future__ import annotations
 
 import json
+import logging
+import math
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
+
+logger = logging.getLogger(__name__)
+
+
+def _tool_call_payloads(response):
+    payloads = []
+    tag_problem = None
+    cursor = 0
+    decoder = json.JSONDecoder()
+    opening = re.compile(r"<tool_call\b[^<>]*(?:>|(?=<)|$)")
+    while match := opening.search(response, cursor):
+        prefix = response[cursor:match.start()]
+        if "</tool_call" in prefix or "<tool_call" in prefix:
+            tag_problem = "Unmatched tool_call tags"
+        start = match.end()
+        while start < len(response) and response[start].isspace():
+            start += 1
+        try:
+            _, length = decoder.raw_decode(response[start:])
+        except ValueError:
+            payloads.append(None)
+            boundary = re.search(r"</tool_call>|(?=<tool_call\b)", response[match.end():])
+            cursor = match.end() + boundary.end() if boundary else len(response)
+            continue
+        end = start + length
+        closing = re.match(r"\s*</tool_call>", response[end:])
+        payloads.append(response[start:end] if match.group() == "<tool_call>" and closing else None)
+        # Decode the whole JSON value before looking for the next block, so
+        # literal tool_call tags inside typed text are not treated as calls.
+        cursor = end + closing.end() if closing else end
+    tail = response[cursor:]
+    if not payloads or "</tool_call" in tail or "<tool_call" in tail:
+        tag_problem = "Unmatched tool_call tags"
+    return payloads, tag_problem
+
+
+def _parse_error(thought, problem):
+    logger.warning("Computer-use parse error: %s", problem)
+    return {
+        "actions": [{"action": "screenshot"}],
+        "metadata": {
+            "thought": thought,
+            "conclusion": f"Parse error: {problem}. Inspect a fresh screenshot and retry with one tool call.",
+            "action_type": "screenshot",
+            "is_terminal": False,
+            "wait_time": None,
+            "parse_error": True,
+        },
+    }
+
+
+def _validate_action(action_json):
+    if not isinstance(action_json, dict):
+        raise ValueError("Tool arguments must be an object")
+    kind = action_json.get("action")
+    mouse_actions = {"mouse_move", "left_click", "click", "right_click", "double_click",
+                     "triple_click", "left_click_drag", "drag"}
+    if not isinstance(kind, str) or kind not in mouse_actions | {"key", "type", "scroll", "wait", "terminate"}:
+        raise ValueError("Missing or unsupported computer-use action")
+
+    def number(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError("Action coordinates and durations must be finite numbers")
+
+    for field in ("coordinate", "coordinate2"):
+        required = (field == "coordinate" and kind in mouse_actions) or (
+            field == "coordinate2" and kind in {"left_click_drag", "drag"}
+        )
+        if required or (kind == "scroll" and field == "coordinate" and field in action_json):
+            point = action_json.get(field)
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                raise ValueError(f"{field} must contain two numbers")
+            for value in point:
+                number(value)
+    if kind == "key":
+        keys = action_json.get("keys")
+        if not ((isinstance(keys, str) and keys) or (
+            isinstance(keys, list) and keys and all(isinstance(key, str) and key for key in keys)
+        )):
+            raise ValueError("key requires a nonempty keys string or list of strings")
+    elif kind == "type" and not isinstance(action_json.get("text"), str):
+        raise ValueError("type requires a text string")
+    elif kind == "scroll":
+        number(action_json.get("pixels", action_json.get("scroll", 0)))
+    elif kind == "wait":
+        duration = action_json.get("time", 1.0)
+        number(duration)
+        if duration < 0:
+            raise ValueError("wait duration must be nonnegative")
+    elif kind == "terminate" and action_json.get("status", "success") not in ("success", "failure"):
+        raise ValueError("terminate status must be success or failure")
 
 
 def convert_point_format_qwen3vl(x, y, scale_dims=True, scale_dims_ratio=(1920 / 1000, 1080 / 1000)):
@@ -31,17 +125,7 @@ def convert_point_format_qwen3vl(x, y, scale_dims=True, scale_dims_ratio=(1920 /
 
 def parse_qwen3vl_response(response, scale_dims=True, scale_dims_ratio=(1920 / 1000, 1080 / 1000)):
     if not response or not isinstance(response, str):
-        return {
-            "actions": [{"action": "screenshot"}],
-            "metadata": {
-                "thought": "Empty or invalid response",
-                "conclusion": "Retrying with screenshot",
-                "action_type": "screenshot",
-                "is_terminal": False,
-                "wait_time": None,
-                "parse_error": True,
-            },
-        }
+        return _parse_error("Empty or invalid response", "Empty or invalid response")
 
     thought = response.split("</think>")[0]
     conclusion = None
@@ -50,28 +134,28 @@ def parse_qwen3vl_response(response, scale_dims=True, scale_dims_ratio=(1920 / 1
 
     printable_ratio = sum(1 for c in response if c.isprintable() or c.isspace()) / max(len(response), 1)
     if printable_ratio < 0.5:
-        print(f"[parse_qwen3vl_response] Warning: Response appears garbled (printable ratio: {printable_ratio:.2f})")
-        return {
-            "actions": [{"action": "screenshot"}],
-            "metadata": {
-                "thought": "Garbled response detected",
-                "conclusion": "Retrying with screenshot",
-                "action_type": "screenshot",
-                "is_terminal": False,
-                "wait_time": None,
-                "parse_error": True,
-            },
-        }
+        return _parse_error(thought, "Garbled response detected")
 
-    if "<tool_call>" in response and "</tool_call>" in response:
-        action = response.split("<tool_call>")[-1].split("</tool_call>")[0]
+    if "<tool_call" in response or "</tool_call" in response:
+        # Keep incomplete blocks in the count: a broken sibling must never
+        # turn a trailing terminate into a standalone call.
+        payloads, tag_problem = _tool_call_payloads(response)
+        if len(payloads) <= 1 and tag_problem:
+            return _parse_error(thought, tag_problem)
     else:
-        try:
-            action = '{"name": "computer_use"' + response.split('{"name": "computer_use"')[1].split("}}")[0] + "}}"
-        except Exception as exc:
-            print(f"[parse_qwen3vl_response] Error parsing action, switching to wait: {exc}", response)
-            action = '{"action": "wait", "time": 1.0}'
-            conclusion = "cannot parse action. waiting for 1 second and trying again"
+        tag_problem = None
+        # Preserve the legacy untagged JSON protocol, without repairing
+        # truncated JSON into an apparently valid termination command.
+        starts = [match.start() for match in re.finditer(r'\{\s*"name"\s*:\s*"computer_use"', response)]
+        payloads = []
+        for start in starts:
+            try:
+                _, end = json.JSONDecoder().raw_decode(response[start:])
+                payloads.append(response[start:start + end])
+            except ValueError:
+                payloads.append(None)
+        if not payloads:
+            return _parse_error(thought, "No computer-use tool call found")
 
     for line in response.split("\n"):
         if "Action:" in line:
@@ -79,42 +163,48 @@ def parse_qwen3vl_response(response, scale_dims=True, scale_dims_ratio=(1920 / 1
     if conclusion is None:
         conclusion = response.split("<tool_call>")[0].strip()
 
-    try:
-        parsed_action = json.loads(action.strip("\n"))
-        if "arguments" in parsed_action:
-            action_json = parsed_action["arguments"]
-        elif "action" in parsed_action:
-            action_json = parsed_action
-        else:
-            raise ValueError("No 'arguments' or 'action' key in parsed JSON")
-    except (json.JSONDecodeError, ValueError, KeyError) as exc:
-        print(f"[parse_qwen3vl_response] Error parsing action JSON: {exc}", action)
-        return {
-            "actions": [{"action": "screenshot"}],
-            "metadata": {
-                "thought": thought,
-                "conclusion": f"Parse error: {exc}",
-                "action_type": "screenshot",
-                "is_terminal": False,
-                "wait_time": None,
-                "parse_error": True,
-            },
-        }
+    parsed_calls = []
+    errors = [tag_problem] if tag_problem else []
+    for index, payload in enumerate(payloads):
+        try:
+            if payload is None:
+                raise ValueError("Incomplete tool_call block or invalid JSON")
+            call = json.loads(payload)
+            if not isinstance(call, dict) or call.get("name", "computer_use") != "computer_use":
+                raise ValueError("Expected a computer_use tool object")
+            action_json = call.get("arguments", call)
+            _validate_action(action_json)
+            parsed = _translate_action(action_json, thought, conclusion, scale_dims, scale_dims_ratio)
+            parsed_calls.append((index, parsed))
+        except (ValueError, TypeError, KeyError, IndexError, OverflowError) as exc:
+            errors.append(f"call {index + 1}: {exc}")
 
-    if "action" not in action_json:
-        print(f"[parse_qwen3vl_response] Missing 'action' key in: {action_json}")
-        return {
-            "actions": [{"action": "screenshot"}],
-            "metadata": {
-                "thought": thought,
-                "conclusion": "Missing action key",
-                "action_type": "screenshot",
-                "is_terminal": False,
-                "wait_time": None,
-                "parse_error": True,
-            },
-        }
+    if len(payloads) == 1:
+        return parsed_calls[0][1] if parsed_calls else _parse_error(thought, "; ".join(errors))
 
+    # One GUI tool call may translate to several wire actions (e.g. typing
+    # with clear/enter). Execute that whole call, then let the normal env.step
+    # observation capture provide a fresh screenshot; never queue siblings.
+    selected = next(((index, parsed) for index, parsed in parsed_calls
+                     if parsed["actions"] and parsed["actions"] != [{"keyboard": {"text": ""}}]), None)
+    ignored = len(payloads) - (1 if selected else 0)
+    warning = f"Detected {len(payloads)} tool calls; ignored {ignored}. "
+    if selected:
+        index, result = selected
+        warning += f"Only GUI call {index + 1} will execute. Inspect the fresh screenshot before choosing one next action."
+        logger.warning("%s", warning)
+    else:
+        warning += "No executable GUI action; termination requires a standalone valid tool call."
+        result = _parse_error(thought, warning + (" " + "; ".join(errors) if errors else ""))
+    result["metadata"].update({
+        "tool_call_count": len(payloads),
+        "ignored_tool_calls": ignored,
+        "tool_call_warning": warning,
+    })
+    return result
+
+
+def _translate_action(action_json, thought, conclusion, scale_dims, scale_dims_ratio):
     metadata = {
         "thought": thought,
         "conclusion": conclusion,
@@ -179,17 +269,12 @@ def parse_qwen3vl_response(response, scale_dims=True, scale_dims_ratio=(1920 / 1
             scale_dims,
             scale_dims_ratio,
         )
-        try:
-            x2, y2 = convert_point_format_qwen3vl(
-                action_json["coordinate2"][0],
-                action_json["coordinate2"][1],
-                scale_dims,
-                scale_dims_ratio,
-            )
-        except Exception as exc:
-            print(f"[parse_qwen3vl_response] Error parsing coordinate2: {exc}")
-            print("Action json: ", action_json)
-            x2, y2 = x1, y1
+        x2, y2 = convert_point_format_qwen3vl(
+            action_json["coordinate2"][0],
+            action_json["coordinate2"][1],
+            scale_dims,
+            scale_dims_ratio,
+        )
         actions = [{"mouse": {"left_click_drag": [[x1, y1], [x2, y2]]}}]
     elif action_json["action"] == "scroll":
         if "coordinate" in action_json:
