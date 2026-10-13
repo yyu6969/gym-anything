@@ -77,8 +77,9 @@ class GymAnythingEnvironment(BaseEnvironment):
 
     @cached_property
     def _ga_config(self) -> Dict[str, Any]:
+        from .container import load_task_config
         path = self.environment_dir / GA_ENV_CONFIG_FILENAME
-        return json.loads(path.read_text())
+        return load_task_config(path)
 
     def _validate_definition(self):
         config_path = self.environment_dir / GA_ENV_CONFIG_FILENAME

@@ -33,9 +33,11 @@ git -C "$SEED_REPO" branch -f main "$BASELINE_COMMIT"
 # GitLab may asynchronously protect the default branch after a browser commit.
 # That is compatible with normal owner edits but rejects the force-push needed
 # to restore an episode. Remove protection only from this task's main branch
-# immediately before the deterministic reset.
+# immediately before the deterministic reset. Deleting the rows does not
+# invalidate GitLab's Redis protected-ref cache; refresh it before checking
+# permissions or pushing so the browser also offers Add LICENSE.
 docker exec gitlab-ce gitlab-rails runner \
-  "p=Project.find_by_full_path('byteblaze/dotfiles'); raise 'missing project' unless p; p.protected_branches.where(name: 'main').destroy_all; puts 'MAIN_RESET_READY'" \
+  "p=Project.find_by_full_path('byteblaze/dotfiles'); raise 'missing project' unless p; p.protected_branches.where(name: 'main').destroy_all; ProtectedBranches::CacheService.new(p).refresh; u=User.find_by!(username: 'byteblaze'); raise 'main is not directly writable' unless Gitlab::UserAccess.new(u,container:p).can_push_to_branch?('main'); puts 'MAIN_RESET_READY'" \
   | tee /tmp/gitlab_task_branch_reset.log
 grep -q 'MAIN_RESET_READY' /tmp/gitlab_task_branch_reset.log
 

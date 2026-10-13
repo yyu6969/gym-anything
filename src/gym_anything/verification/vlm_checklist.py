@@ -163,6 +163,12 @@ def evaluate_vlm_checklist(
     except Exception as exc:
         return _failure(f"failed to load VLM checklist {checklist_path}: {exc}", config=config)
 
+    if checklist.get("schema_version") == "binary_outcome_checklist":
+        try:
+            validate_binary_checklist(checklist)
+        except ValueError as exc:
+            return _failure(str(exc), config=config)
+
     images = _select_images(traj, max_frames=config.max_frames, strategy=config.frame_strategy)
     if not images:
         return _failure("no trajectory screenshots available for VLM checklist verifier", config=config)
@@ -217,6 +223,24 @@ def build_verification_prompt(
     task_description: str,
     image_count: int,
 ) -> str:
+    if checklist.get("schema_version") == "binary_outcome_checklist":
+        validate_binary_checklist(checklist)
+        return f"""You are evaluating outcome criteria against {image_count} chronological screenshots.
+
+Task description:
+{task_description}
+
+Outcome checklist:
+{json.dumps(checklist['items'], indent=2)}
+
+Scoring rules:
+- Return only PASS or FAIL for each item, using its exact ID.
+- PASS requires clear evidence that the entire criterion, description and condition are satisfied. Outcomes may be evidenced at different times in the trajectory.
+- FAIL applies to incomplete, missing, blocked or uncertain outcomes.
+- All items are binary and equal. Any partial-credit language in source descriptions means FAIL unless the full outcome is satisfied.
+- Evaluate outcomes only; do not require a particular interaction sequence.
+
+Return only JSON: {{"items": [{{"id": "item_id", "verdict": "PASS|FAIL", "evidence": "observed evidence"}}], "overall_reasoning": "brief justification"}}"""
     completion_items = []
     for item in checklist.get("task_completion", []):
         completion_items.append(
@@ -282,6 +306,8 @@ def compute_scores(
     completion_threshold: float,
     integrity_threshold: float,
 ) -> Dict[str, Any]:
+    if checklist.get("schema_version") == "binary_outcome_checklist":
+        return compute_binary_scores(verdicts, checklist)
     completion_items = checklist.get("task_completion", []) or []
     completion_verdicts = _verdict_map(verdicts.get("task_completion", []))
     default_points = 100.0 / len(completion_items) if completion_items else 0.0
@@ -352,6 +378,47 @@ def compute_scores(
         "integrity_details": integrity_details,
         "overall_reasoning": verdicts.get("overall_reasoning", ""),
     }
+
+
+def validate_binary_checklist(checklist: Dict[str, Any]) -> None:
+    items = checklist.get("items")
+    if not isinstance(items, list) or not items:
+        raise ValueError("binary checklist requires non-empty items")
+    ids = set()
+    for item in items:
+        if not isinstance(item, dict) or item.get("scoring") != "binary":
+            raise ValueError("each binary checklist item must declare scoring=binary")
+        identity = item.get("id")
+        if not isinstance(identity, str) or not identity or identity in ids:
+            raise ValueError("binary checklist IDs must be non-empty and unique")
+        if any(key in item for key in ("points", "weight", "weights")):
+            raise ValueError("binary checklist items cannot have points or weights")
+        ids.add(identity)
+
+
+def compute_binary_scores(verdicts: Dict[str, Any], checklist: Dict[str, Any]) -> Dict[str, Any]:
+    validate_binary_checklist(checklist)
+    records: Dict[str, list] = {}
+    for record in verdicts.get("items", []) or []:
+        if isinstance(record, dict) and isinstance(record.get("id"), str):
+            records.setdefault(record["id"], []).append(record)
+    details = []
+    for item in checklist["items"]:
+        matches = records.get(item["id"], [])
+        record = matches[0] if len(matches) == 1 else {}
+        # Missing, duplicate and malformed verdicts fail closed. No numeric
+        # score, synonym or partial verdict can yield credit.
+        score = int(record.get("verdict") == "PASS")
+        details.append({"id": item["id"], "score": score,
+                        "verdict": "PASS" if score else "FAIL",
+                        "evidence": record.get("evidence", "")})
+    item_scores = [item["score"] for item in details]
+    passed = all(item_scores)
+    return {"scoring": "binary", "scoring_policy": checklist.get("scoring_policy"),
+            "item_scores": item_scores, "item_details": details,
+            "passed": passed, "reward": float(passed),
+            "final_score": sum(item_scores) / len(item_scores) * 100,
+            "overall_reasoning": verdicts.get("overall_reasoning", "")}
 
 
 def _failure(
@@ -449,7 +516,7 @@ def _uniform_sample(items: Sequence[str], count: int) -> List[str]:
 def _extract_verdicts(response: Dict[str, Any]) -> Dict[str, Any]:
     parsed = response.get("parsed")
     if isinstance(parsed, dict) and (
-        "task_completion" in parsed or "integrity" in parsed or "overall_reasoning" in parsed
+        "task_completion" in parsed or "integrity" in parsed or "overall_reasoning" in parsed or "items" in parsed
     ):
         return parsed
     parsed_text = parse_vlm_json(response.get("response", ""))
@@ -497,6 +564,8 @@ def _task_description(task_info: Dict[str, Any]) -> str:
 
 
 def _default_feedback(scores: Dict[str, Any]) -> str:
+    if scores.get("scoring") == "binary":
+        return f"Binary outcome checklist score {scores['final_score']}; passed={scores['passed']}."
     score = scores.get("final_score", 0)
     integrity = "passed" if scores.get("score_b") else "failed"
     return f"VLM checklist score {score}; integrity {integrity}."

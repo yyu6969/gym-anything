@@ -33,12 +33,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 from urllib.request import Request, urlopen
+
+from .packaging import directory_digest, resolve_asset
 
 DEFAULT_TASK_CONFIG_PATH = "/harbor-task/gym-anything.json"
 DEFAULT_PORT = 7317
@@ -51,6 +55,13 @@ _VERIFIER_JSON_PATH = "/logs/verifier/verifier.json"
 # -- shared boot / grading helpers (also used by the Harbor backend) ----------
 
 
+def load_task_config(path: Path | str) -> Dict[str, Any]:
+    path = Path(path).resolve()
+    config = json.loads(path.read_text())
+    config["_asset_root"] = str(path.parent)
+    return config
+
+
 def boot_env(config: Dict[str, Any], *, force_build: bool = False, default_runner: Optional[str] = None):
     """Boot a GymAnythingEnv from a compiled task's gym-anything.json config.
 
@@ -61,12 +72,49 @@ def boot_env(config: Dict[str, Any], *, force_build: bool = False, default_runne
     from ...config.loading import from_config
     from ...registry import resolve_environment_dir
 
-    env_dir = config.get("env_dir") or resolve_environment_dir(
-        config["env_name"], config.get("benchmark")
-    )
+    asset_root = Path(config.get("_asset_root", "/harbor-task"))
+    if config.get("environment_snapshot"):
+        env_dir = resolve_asset(config, "environment_snapshot", asset_root)
+        if directory_digest(env_dir) != config["environment_snapshot_sha256"]:
+            raise ValueError("Packaged environment snapshot digest mismatch")
+    else:
+        env_dir = config.get("env_dir") or resolve_environment_dir(
+            config["env_name"], config.get("benchmark")
+        )
+    # Resolve and validate external grading inputs before boot, fail closed.
+    if config.get("verifier_bundle"):
+        _external_checklist(config)
     runner = config.get("runner") or default_runner
-    overrides = {"runner": runner} if runner else None
+    overrides = {"runner": runner} if runner else {}
+    if config.get("environment_snapshot"):
+        # Hooks, writable mounts and Python verifier imports may write into
+        # an environment. Give each trial its own copy of the immutable
+        # packaged snapshot, with recordings alongside it.
+        trial_root = Path(tempfile.mkdtemp(prefix="harbor-gym-episode-"))
+        runtime_env_dir = trial_root / "gym-environment"
+        shutil.copytree(env_dir, runtime_env_dir)
+        env_dir = runtime_env_dir
+        spec = json.loads((Path(env_dir) / "env.json").read_text())
+        overrides["mounts"] = [
+            {**mount, "source": str((Path(env_dir) / mount["source"]).resolve())}
+            for mount in spec.get("mounts", [])
+        ]
+        # Recording must never modify a content-addressed deployment snapshot.
+        overrides["recording"] = {"output_dir": str(trial_root / "artifacts")}
     env = from_config(env_dir, task_id=config["task_id"], overrides=overrides)
+    if config.get("environment_snapshot") and env.env_spec.dockerfile:
+        from ... import __file__ as package_file
+        dockerfile = Path(env.env_spec.dockerfile)
+        if str(dockerfile).startswith("gym_anything/"):
+            dockerfile = Path(package_file).parent.parent / dockerfile
+        elif not dockerfile.is_absolute():
+            dockerfile = Path(env_dir) / dockerfile
+        if not dockerfile.is_file():
+            raise FileNotFoundError(f"Packaged Dockerfile is missing: {dockerfile}")
+        env.env_spec.dockerfile = str(dockerfile.resolve())
+    if config.get("instruction") is not None:
+        env.task_spec.description = config["instruction"]
+    apply_verifier_config(env, config)
     env.reset(
         seed=int(config.get("seed", 0)),
         use_cache=bool(config.get("use_cache", True)) and not force_build,
@@ -74,8 +122,17 @@ def boot_env(config: Dict[str, Any], *, force_build: bool = False, default_runne
         use_savevm=bool(config.get("use_savevm", False)),
     )
     env.set_episode_limits(max_steps=100_000, timeout_sec=10**9)
-    apply_verifier_config(env, config)
     return env
+
+
+def _external_checklist(config: Dict[str, Any]) -> Path:
+    bundle = resolve_asset(config, "verifier_bundle", Path(config.get("_asset_root", "/harbor-task")))
+    if directory_digest(bundle) != config["verifier_bundle_sha256"]:
+        raise ValueError("External verifier bundle digest mismatch")
+    checklist = bundle / "checklist.json"
+    if not checklist.is_file():
+        raise FileNotFoundError(checklist)
+    return checklist
 
 
 def apply_verifier_config(
@@ -87,7 +144,7 @@ def apply_verifier_config(
     phase's process, so the key may only become available at finalize time.
     """
     verifier = config.get("verifier") or {}
-    if not verifier:
+    if not verifier and not config.get("verifier_bundle"):
         return
     lookup = {**os.environ, **(extra_env or {})}
     overrides: Dict[str, str] = {}
@@ -102,6 +159,13 @@ def apply_verifier_config(
     key_var = verifier.get("vlm_api_key_var")
     if key_var and lookup.get(key_var):
         overrides["VLM_API_KEY"] = lookup[key_var]
+    if config.get("verifier_bundle"):
+        checklist_path = _external_checklist(config)
+        if json.loads(checklist_path.read_text()).get("schema_version") == "binary_outcome_checklist":
+            env.task_spec.init.reward_type = "sparse"
+        overrides["GYM_ANYTHING_VERIFIER_MODE"] = "vlm_checklist"
+        overrides["GYM_ANYTHING_VLM_CHECKLIST_CHECKLIST"] = str(checklist_path)
+        overrides["GYM_ANYTHING_VLM_CHECKLIST_FRAME_STRATEGY"] = "all"
     env.set_verifier_overrides(overrides)
 
 
@@ -274,7 +338,7 @@ def _write_agent_manual(port: int) -> None:
 
 
 def serve(config_path: str, port: int) -> None:
-    config = json.loads(Path(config_path).read_text())
+    config = load_task_config(config_path)
     print(f"[harbor-container] booting {config.get('env_name')}/{config.get('task_id')}")
     env = boot_env(
         config,

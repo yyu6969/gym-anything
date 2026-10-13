@@ -856,6 +856,8 @@ class GymAnythingEnv:
         reward_type = self.task_spec.init.reward_type
         verifier = summary.get("verifier", {}) or {}
         passed = bool(verifier.get("passed"))
+        if (verifier.get("scores") or {}).get("scoring") == "binary":
+            return float(passed)
         try:
             score = float(verifier.get("score", 100.0 if passed else 0.0))
         except Exception:

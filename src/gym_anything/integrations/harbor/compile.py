@@ -31,10 +31,13 @@ the gym-anything registry, so compilation (and its tests) run everywhere.
 from __future__ import annotations
 
 import json
+import re
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ...registry import get_tasks_for_environment, resolve_environment_dir
+from .packaging import copy_assets, directory_digest, json_bytes, snapshot_environment, snapshot_runtime
 
 _UNSET: Dict[str, Any] = {"__unset__": True}
 
@@ -201,6 +204,9 @@ def compile_task(
     gym_anything_ref: str = "main",
     pip_extras: str = "",
     verifier: Optional[Dict[str, Any]] = _UNSET,  # type: ignore[assignment]
+    instruction: Optional[str] = None,
+    verifier_bundle: Optional[Path | str] = None,
+    packaging_mode: Optional[str] = None,
 ) -> Path:
     """Compile one benchmark task into a Harbor task directory.
 
@@ -210,19 +216,40 @@ def compile_task(
     task image, with the CUA-World corpus (the cua-world package) from the
     same ref; ``pip_extras`` adds extras (e.g. ``"benchmark"`` for the full
     verifier dependency corpus — core deps already cover PIL/numpy).
+
+    ``instruction`` overrides both Harbor instruction fields and the runtime
+    task description. ``verifier_bundle`` is a directory containing an
+    authoritative ``checklist.json`` plus arbitrary provenance assets.
+    Explicit ``registry_ref`` requires a full immutable commit SHA; omitting
+    ``packaging_mode`` preserves the legacy thin artifact and ref defaults.
+    ``vendored_snapshot`` packages the selected environment/task and this
+    Gym runtime, so freshly created local tasks need no source registry.
     """
+    mode = packaging_mode or "registry_ref"
+    if mode not in {"registry_ref", "vendored_snapshot"}:
+        raise ValueError(f"Unknown packaging mode: {mode}")
+    if packaging_mode == "registry_ref" and not re.fullmatch(r"[0-9a-fA-F]{40}", gym_anything_ref):
+        raise ValueError("Explicit registry_ref requires an immutable 40-character Gym/CUA-World revision")
     resolved_env_dir = (
         Path(env_dir) if env_dir else resolve_environment_dir(env_name, benchmark)
-    )
+    ).resolve()
     task_dir = resolved_env_dir / "tasks" / task_id
     task_json_path = task_dir / "task.json"
     task_json = json.loads(task_json_path.read_text())
-    description = str(task_json.get("description") or "").strip()
-    if not description:
+    description = instruction if instruction is not None else str(task_json.get("description") or "").strip()
+    if not description.strip():
         raise ValueError(f"Task {env_name}/{task_id} has no description in {task_json_path}")
 
     slug = f"{env_name}__{task_id}"
     out_dir = Path(out_root) / slug
+    if out_dir.resolve().is_relative_to(resolved_env_dir):
+        raise ValueError("Harbor output must be outside the canonical environment")
+    bundle = Path(verifier_bundle).resolve() if verifier_bundle is not None else None
+    if bundle is not None:
+        checklist = json.loads((bundle / "checklist.json").read_text())
+        if checklist.get("schema_version") == "binary_outcome_checklist":
+            from ...verification.vlm_checklist import validate_binary_checklist
+            validate_binary_checklist(checklist)
     (out_dir / "environment").mkdir(parents=True, exist_ok=True)
     (out_dir / "tests").mkdir(exist_ok=True)
 
@@ -238,18 +265,51 @@ def compile_task(
     }
     if runner:
         ga_config["runner"] = runner
+    if instruction is not None:
+        ga_config["instruction"] = instruction
     if verifier is not _UNSET:
         if verifier:
             ga_config["verifier"] = dict(verifier)
     else:
         ga_config["verifier"] = dict(_DEFAULT_VERIFIER)
+    dockerfile = _DOCKERFILE.format(ref=gym_anything_ref, extras=f"[{pip_extras}]" if pip_extras else "")
+    for name in ("verifier", "gym-environment", "gym-runtime"):
+        target = out_dir / "environment" / name
+        if target.exists():
+            shutil.rmtree(target)
+    if bundle is not None:
+        target = out_dir / "environment" / "verifier"
+        copy_assets(bundle, target)
+        ga_config["verifier_bundle"] = "verifier"
+        ga_config["verifier_bundle_sha256"] = directory_digest(target)
+        ga_config.setdefault("verifier", dict(_DEFAULT_VERIFIER))["mode"] = "vlm_checklist"
+        dockerfile = dockerfile.replace("COPY gym-anything.json /harbor-task/gym-anything.json",
+                                        "COPY gym-anything.json /harbor-task/gym-anything.json\nCOPY verifier /harbor-task/verifier")
+    if mode == "vendored_snapshot":
+        ga_config["packaging_mode"] = mode
+        ga_config["environment_snapshot"] = "gym-environment"
+        ga_config["environment_snapshot_sha256"] = snapshot_environment(
+            resolved_env_dir, task_id, out_dir / "environment" / "gym-environment")
+        ga_config["runtime_snapshot_sha256"] = snapshot_runtime(out_dir / "environment" / "gym-runtime")
+        install_start = dockerfile.index("ARG GYM_ANYTHING_REF=")
+        install_end = dockerfile.index("COPY gym-anything.json", install_start)
+        needs_vlm = (ga_config.get("verifier") or {}).get("mode") == "vlm_checklist"
+        extras = ",".join(filter(None, [pip_extras, "vlm" if needs_vlm else ""]))
+        local_spec = "/harbor-task/gym-runtime" + (f"[{extras}]" if extras else "")
+        dockerfile = (dockerfile[:install_start]
+                      + 'COPY gym-runtime /harbor-task/gym-runtime\n'
+                      + f'RUN pip install --no-cache-dir "{local_spec}"\n\n'
+                      + dockerfile[install_end:])
+        dockerfile = dockerfile.replace("COPY gym-anything.json /harbor-task/gym-anything.json",
+                                        "COPY gym-anything.json /harbor-task/gym-anything.json\nCOPY gym-environment /harbor-task/gym-environment")
+    elif packaging_mode is not None:
+        ga_config.update(packaging_mode=mode, gym_anything_ref=gym_anything_ref)
     (out_dir / "environment" / "gym-anything.json").write_text(
         json.dumps(ga_config, indent=2) + "\n"
     )
 
-    extras = f"[{pip_extras}]" if pip_extras else ""
     (out_dir / "environment" / "Dockerfile").write_text(
-        _DOCKERFILE.format(ref=gym_anything_ref, extras=extras)
+        dockerfile
     )
     (out_dir / "environment" / "docker-compose.yaml").write_text(_DOCKER_COMPOSE)
 

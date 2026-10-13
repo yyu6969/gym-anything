@@ -144,6 +144,14 @@ VLM checklist tasks use a checked-in `vlm_checklist.json` file in the task folde
 
 Checklist generation is intentionally separate from task execution. Normal evals assume the checklist already exists.
 
+## External binary outcome checklists and Harbor export
+
+The Harbor compiler accepts `instruction`, `verifier_bundle`, and `packaging_mode` keyword arguments. A bundle directory contains an authoritative `checklist.json` and arbitrary provenance assets. It is packaged under `environment/verifier/`; both Docker and the custom Gym backend resolve the same file outside the agent-controlled guest. A missing or altered bundle fails closed rather than using the task's program verifier or canonical checklist.
+
+A checklist with `schema_version: "binary_outcome_checklist"` contains `items` with unique `id`, outcome text (`criterion`, optional `description` and `condition`), and `scoring: "binary"`. Its `scoring_policy` is an opaque producer identifier. Each verdict must be exactly `PASS` or `FAIL`; missing, duplicate, invalid, or incomplete verdicts earn zero. All items are equal, points and weights are rejected, score is the percentage passed, and success/reward require every item to pass. Existing task-completion/integrity checklists retain their current grading behavior.
+
+Explicit `packaging_mode="registry_ref"` requires `gym_anything_ref` to be a full immutable commit SHA shared by Gym and CUA-World. Omitting the packaging mode retains the historical thin artifact and ref defaults. `packaging_mode="vendored_snapshot"` packages shared environment assets, the selected task, and the compiler's current Gym runtime. Digests record deployment content; runtime loading bypasses the registry, resolves mount paths inside the snapshot, and writes recordings outside it. Snapshot inputs require environment-local mount sources and reject external symlinks. Presets remain part of the packaged Gym runtime. Runtime dependency and base-image provisioning still follow the normal Gym execution requirements.
+
 ## If You Want To Understand A Task Quickly
 
 Read these files in order:
