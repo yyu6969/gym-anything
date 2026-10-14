@@ -36,26 +36,19 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Optional
 
 from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
-from harbor.models.trajectories import (
-    Agent as AtifAgent,
-    ContentPart,
-    FinalMetrics,
-    ImageSource,
-    Observation,
-    ObservationResult,
-    Step,
-    ToolCall,
-    Trajectory,
-)
+from .portable_agent import _TrajectoryRecorder
 
 _CONTAINER_PORT = 7317
+logger = logging.getLogger(__name__)
 
 
 # -- environment drivers --------------------------------------------------------
@@ -154,73 +147,6 @@ def _make_driver(environment: Any, images_dir: Path, port: int):
     )
 
 
-# -- ATIF trajectory recording ----------------------------------------------------
-
-
-class _TrajectoryRecorder:
-    def __init__(self, logs_dir: Path, agent_name: str, version: str, model_name: str | None):
-        self._logs_dir = logs_dir
-        self._agent = AtifAgent(name=agent_name, version=version, model_name=model_name)
-        self._steps: list[Step] = []
-
-    def record_turn(
-        self,
-        response_text: str,
-        groups: list,
-        screenshot_path: Optional[Path],
-    ) -> None:
-        step_id = len(self._steps) + 1
-        tool_calls = [
-            ToolCall(
-                tool_call_id=f"step{step_id}-{idx}",
-                function_name="computer_use",
-                arguments={"actions": group.get("actions") or []},
-            )
-            for idx, group in enumerate(groups or [])
-        ]
-        observation = None
-        if screenshot_path is not None:
-            relative = screenshot_path.relative_to(self._logs_dir)
-            observation = Observation(
-                results=[
-                    ObservationResult(
-                        source_call_id=tool_calls[-1].tool_call_id if tool_calls else None,
-                        content=[
-                            ContentPart(
-                                type="image",
-                                source=ImageSource(
-                                    media_type="image/png", path=str(relative)
-                                ),
-                            )
-                        ],
-                    )
-                ]
-            )
-        self._steps.append(
-            Step(
-                step_id=step_id,
-                source="agent",
-                message=response_text,
-                tool_calls=tool_calls or None,
-                observation=observation,
-            )
-        )
-
-    def write(self, session_id: str | None) -> None:
-        trajectory = Trajectory(
-            schema_version="ATIF-v1.7",
-            session_id=session_id,
-            trajectory_id=f"cua-world-{session_id}" if session_id else None,
-            agent=self._agent,
-            steps=self._steps,
-            final_metrics=FinalMetrics(total_steps=len(self._steps)),
-        )
-        self._logs_dir.mkdir(parents=True, exist_ok=True)
-        (self._logs_dir / "trajectory.json").write_text(
-            trajectory.model_dump_json(indent=2, exclude_none=True) + "\n"
-        )
-
-
 # -- the agent --------------------------------------------------------------------
 
 
@@ -270,6 +196,8 @@ class CuaWorldAgent(BaseAgent):
             Path(self.logs_dir), self.name(), self.version() or "unknown", self.model_name
         )
 
+        initialized = False
+        failure = None
         try:
             obs = await driver.observe()
             resolution = tuple(obs["screen"]["resolution"])
@@ -278,10 +206,14 @@ class CuaWorldAgent(BaseAgent):
                 display_resolution=resolution,
                 save_path=str(self.logs_dir),
             )
+            initialized = True
 
             action_outputs: list[dict[str, Any]] = []
             for _ in range(self._max_steps):
+                started = time.perf_counter()
                 action_groups = await asyncio.to_thread(agent.step, obs, action_outputs)
+                agent_ms = (time.perf_counter() - started) * 1000
+                env_started = time.perf_counter()
                 action_outputs = []
                 done = False
                 for group in action_groups or []:
@@ -295,14 +227,37 @@ class CuaWorldAgent(BaseAgent):
                     response_text=self._last_response(agent, action_groups),
                     groups=action_groups or [],
                     screenshot_path=Path(obs["screen"]["path"]),
+                    usage=(agent.raw_responses[-1].usage.model_dump(exclude_none=True)
+                           if getattr(agent, "raw_responses", None) and agent.raw_responses[-1].usage else None),
                 )
+                with (Path(self.logs_dir) / "timing.jsonl").open("a") as handle:
+                    handle.write(json.dumps({"agent_ms": agent_ms,
+                                             "environment_ms": (time.perf_counter() - env_started) * 1000}) + "\n")
                 if getattr(agent, "done", False) or done:
                     break
+        except BaseException as exc:
+            failure = exc
+            (Path(self.logs_dir) / "failure.json").write_text(
+                json.dumps({"error": type(exc).__name__, "message": str(exc)}) + "\n")
+            raise
         finally:
-            recorder.write(self.session_id)
+            try:
+                if initialized:
+                    try:
+                        await asyncio.to_thread(agent.finish)
+                    except Exception as exc:
+                        if failure is None:
+                            raise
+                        failure.add_note(f"Reference agent cleanup failed: {exc}")
+                        logger.exception("Reference agent cleanup failed")
+            finally:
+                recorder.write(self.session_id)
 
     @staticmethod
     def _last_response(agent: Any, action_groups: list) -> str:
+        raw = getattr(agent, "raw_responses", None)
+        if raw:
+            return raw[-1].choices[0].message.content or ""
         responses = getattr(agent, "all_model_responses", None)
         if responses:
             return str(responses[-1])

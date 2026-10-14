@@ -32,11 +32,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import shutil
 import sys
 import tempfile
 import threading
+import signal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -47,6 +49,7 @@ from .packaging import directory_digest, resolve_asset
 DEFAULT_TASK_CONFIG_PATH = "/harbor-task/gym-anything.json"
 DEFAULT_PORT = 7317
 DEFAULT_CONTAINER_RUNNER = "qemu"  # auto-selects apptainer/native per host
+logger = logging.getLogger(__name__)
 
 _REWARD_JSON_PATH = "/logs/verifier/reward.json"
 _VERIFIER_JSON_PATH = "/logs/verifier/verifier.json"
@@ -62,7 +65,8 @@ def load_task_config(path: Path | str) -> Dict[str, Any]:
     return config
 
 
-def boot_env(config: Dict[str, Any], *, force_build: bool = False, default_runner: Optional[str] = None):
+def boot_env(config: Dict[str, Any], *, force_build: bool = False, default_runner: Optional[str] = None,
+             artifact_root: Optional[Path] = None):
     """Boot a GymAnythingEnv from a compiled task's gym-anything.json config.
 
     The same boot path the verifiers adapter uses, checkpoint caching
@@ -71,6 +75,15 @@ def boot_env(config: Dict[str, Any], *, force_build: bool = False, default_runne
     """
     from ...config.loading import from_config
     from ...registry import resolve_environment_dir
+    from ...runtime.runners.sandweave import SandweaveRunner
+    from ...runtime_paths import reusable_cache_paths
+
+    if config.get("deployment_profile") == "sandweave":
+        if config.get("runner") != "sandweave":
+            raise ValueError("Sandweave deployment profile requires runner=sandweave")
+        for name in ("GA_HARBOR_RUNNER", "GYM_ANYTHING_RUNNER"):
+            if os.environ.get(name, "sandweave").lower() != "sandweave":
+                raise ValueError(f"{name} conflicts with the Sandweave deployment profile")
 
     asset_root = Path(config.get("_asset_root", "/harbor-task"))
     if config.get("environment_snapshot"):
@@ -100,7 +113,7 @@ def boot_env(config: Dict[str, Any], *, force_build: bool = False, default_runne
             for mount in spec.get("mounts", [])
         ]
         # Recording must never modify a content-addressed deployment snapshot.
-        overrides["recording"] = {"output_dir": str(trial_root / "artifacts")}
+        overrides["recording"] = {"output_dir": str(artifact_root or trial_root / "artifacts")}
     env = from_config(env_dir, task_id=config["task_id"], overrides=overrides)
     if config.get("environment_snapshot") and env.env_spec.dockerfile:
         from ... import __file__ as package_file
@@ -115,12 +128,24 @@ def boot_env(config: Dict[str, Any], *, force_build: bool = False, default_runne
     if config.get("instruction") is not None:
         env.task_spec.description = config["instruction"]
     apply_verifier_config(env, config)
-    env.reset(
-        seed=int(config.get("seed", 0)),
-        use_cache=bool(config.get("use_cache", True)) and not force_build,
-        cache_level=config.get("cache_level", "post_start"),
-        use_savevm=bool(config.get("use_savevm", False)),
-    )
+    if isinstance(env.runner, SandweaveRunner):
+        # Native CLI setup applies this machine-cache default before reset.
+        # Custom Harbor backends bypass that CLI; retain any explicit SDK home.
+        os.environ.setdefault("SANDWEAVE_HOME", str(reusable_cache_paths().sandweave))
+    try:
+        env.reset(
+            seed=int(config.get("seed", 0)),
+            use_cache=bool(config.get("use_cache", True)) and not force_build,
+            cache_level=config.get("cache_level", "post_start"),
+            use_savevm=bool(config.get("use_savevm", False)),
+        )
+    except BaseException as exc:
+        try:
+            env.close()
+        except Exception as cleanup_error:
+            exc.add_note(f"Environment cleanup failed: {cleanup_error}")
+            logger.exception("Environment cleanup after failed boot failed")
+        raise
     env.set_episode_limits(max_steps=100_000, timeout_sec=10**9)
     return env
 
@@ -214,6 +239,51 @@ class _Runtime:
         self.config = config or {}
         self.lock = threading.Lock()
         self._finalize_result: Optional[Dict[str, Any]] = None
+        self.policy = None
+
+    def policy_start(self, request: dict) -> dict:
+        from .policy import ReferencePolicy
+        with self.lock:
+            if not self.config.get("portable_agent"):
+                raise RuntimeError("This task does not enable the packaged reference policy")
+            if self.policy is not None:
+                raise RuntimeError("Policy has already been initialized")
+            for key, value in (request.get("env") or {}).items():
+                if key in {"GEMINI_API_KEY", "GOOGLE_API_KEY"} and value:
+                    os.environ[key] = value
+            self.policy = ReferencePolicy(self.env, model=request["model"],
+                                          max_steps=request.get("max_steps", 50), logs_dir=Path("/logs/agent"))
+        return {"status": "ready"}
+
+    def policy_step(self) -> dict:
+        with self.lock:
+            if self.policy is None:
+                raise RuntimeError("Policy has not been initialized")
+            result = self.policy.step()
+            result.update(_obs_payload(self.policy.obs))
+            if result["done"]:
+                self.policy.finish()
+            return result
+
+    def policy_finish(self, *, wait: bool = True) -> dict:
+        if not self.lock.acquire(blocking=wait):
+            raise RuntimeError("Policy request is still active during controller shutdown")
+        try:
+            if self.policy is not None:
+                self.policy.finish()
+        finally:
+            self.lock.release()
+        return {"status": "finished"}
+
+    def record_error(self, stage: str, error: BaseException) -> None:
+        root = Path(self.env.episode_dir).parent
+        try:
+            with (root / "errors.jsonl").open("a") as handle:
+                handle.write(json.dumps({"stage": stage, "error": type(error).__name__,
+                                         "message": str(error)}) + "\n")
+        except OSError as exc:
+            error.add_note(f"Could not persist controller error: {exc}")
+            logger.exception("Could not persist controller error")
 
     def observe(self) -> Dict[str, Any]:
         with self.lock:
@@ -236,11 +306,16 @@ class _Runtime:
     def finalize(self, extra_env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         with self.lock:
             if self._finalize_result is None:
+                if self.policy is not None:
+                    self.policy.finish()
                 # The grader key arrives with the verifier phase (Harbor's
                 # [verifier.env]); re-resolve overrides before grading.
                 apply_verifier_config(self.env, self.config, extra_env)
                 reward, verifier = finalize_episode(self.env)
                 self._finalize_result = {"reward": reward, "verifier": verifier}
+                if self.config.get("deployment_profile") == "sandweave":
+                    from .deployment import collect_sandweave_logs
+                    collect_sandweave_logs(Path(self.env.episode_dir).parent)
         return self._finalize_result
 
 
@@ -291,9 +366,16 @@ class _Handler(BaseHTTPRequestHandler):
             elif self.path == "/finalize":
                 request = self._read_json()
                 self._send_json(self.runtime.finalize(request.get("env") or None))
+            elif self.path == "/policy/start":
+                self._send_json(self.runtime.policy_start(self._read_json()))
+            elif self.path == "/policy/step":
+                self._send_json(self.runtime.policy_step())
+            elif self.path == "/policy/finish":
+                self._send_json(self.runtime.policy_finish())
             else:
                 self._send_json({"error": f"unknown path {self.path}"}, status=404)
         except Exception as exc:  # surface errors to the caller, keep serving
+            self.runtime.record_error(self.path, exc)
             self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=500)
 
 
@@ -337,30 +419,81 @@ def _write_agent_manual(port: int) -> None:
             pass
 
 
-def serve(config_path: str, port: int) -> None:
+def _close_runtime(runtime: _Runtime, failure: Optional[BaseException] = None) -> None:
+    errors = []
+    # A cancelled host request may leave an RPC thread in a provider call. Do
+    # not block shutdown on that thread; completed responses are checkpointed.
+    try:
+        runtime.policy_finish(wait=False)
+    except Exception as exc:
+        errors.append(exc)
+    try:
+        runtime.env.close()
+    except Exception as exc:
+        errors.append(exc)
+    if errors:
+        primary = failure or errors[0]
+        for error in errors:
+            primary.add_note(f"Controller cleanup failed: {error}")
+            logger.error("Controller cleanup failed: %s", error)
+        if failure is None:
+            raise primary
+
+
+def _serve(config_path: str, port: int) -> None:
     config = load_task_config(config_path)
+    if config.get("deployment_profile") == "sandweave":
+        from .deployment import prepare_sandweave_worker
+        prepare_sandweave_worker(config, Path("/logs/verifier/gym"))
     print(f"[harbor-container] booting {config.get('env_name')}/{config.get('task_id')}")
     env = boot_env(
         config,
-        default_runner=os.environ.get("GA_HARBOR_RUNNER", DEFAULT_CONTAINER_RUNNER),
+        default_runner=os.environ.get("GA_HARBOR_RUNNER") or config.get("runner") or DEFAULT_CONTAINER_RUNNER,
+        # Harbor downloads verifier logs AFTER verification, including late
+        # final.png, summary.json and post_verification.png. Agent artifacts
+        # may have been collected before those files existed.
+        artifact_root=Path("/logs/verifier/gym"),
     )
-    _write_agent_manual(port)
-    # Harbor expects its log dirs to exist for phase transfers. Best-effort:
-    # in the task container this runs as root; a bare process (validation
-    # runs outside docker) has no business writing at /.
-    for path in ("/logs/agent", "/logs/verifier", "/logs/artifacts"):
-        try:
-            Path(path).mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
-
-    _Handler.runtime = _Runtime(env, config)
-    server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
-    print(f"[harbor-container] ready on :{port}")
+    runtime = _Runtime(env, config)
+    server = None
+    failure = None
     try:
+        if config.get("deployment_profile") == "sandweave":
+            info = {"runner": type(env.runner).__name__, "environment_id": env.env_spec.id,
+                    "task_id": env.task_spec.id, "instance_name": env.runner.get_runtime_info().instance_name}
+            Path("/logs/verifier/gym/runtime-binding.json").write_text(json.dumps(info, indent=2) + "\n")
+        _write_agent_manual(port)
+        for path in ("/logs/agent", "/logs/verifier", "/logs/artifacts"):
+            Path(path).mkdir(parents=True, exist_ok=True)
+        _Handler.runtime = runtime
+        server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
+        print(f"[harbor-container] ready on :{port}")
         server.serve_forever()
+    except BaseException as exc:
+        failure = exc
+        runtime.record_error("serve", exc)
+        raise
     finally:
-        env.close()
+        try:
+            if server is not None:
+                server.server_close()
+        finally:
+            _close_runtime(runtime, failure)
+
+
+def serve(config_path: str, port: int) -> None:
+    previous = signal.getsignal(signal.SIGTERM)
+    def terminate(_signum, _frame):
+        raise KeyboardInterrupt("Harbor controller received SIGTERM")
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        _serve(config_path, port)
+    finally:
+        try:
+            from .deployment import collect_sandweave_logs
+            collect_sandweave_logs(Path("/logs/verifier/gym"))
+        finally:
+            signal.signal(signal.SIGTERM, previous)
 
 
 # -- finalize mode (invoked by tests/test.sh inside the container) -------------

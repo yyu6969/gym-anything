@@ -97,7 +97,8 @@ class GymAnythingEnvironment(BaseEnvironment):
     def _start_sync(self, force_build: bool) -> None:
         from .container import boot_env
 
-        env = boot_env(self._ga_config, force_build=force_build)
+        env = boot_env(self._ga_config, force_build=force_build,
+                       artifact_root=self.trial_paths.verifier_dir / "gym")
         # Docker images get these from harbor's mount structure; a guest VM
         # must create them so phase log/artifact transfers have a target.
         env.runner.exec(

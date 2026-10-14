@@ -312,7 +312,9 @@ class SandweaveRunner(BaseRunner):
         # The SDK has no top-level lookup API; use the metadata RPC its cache CLI uses.
         from sandweave.sandbox.targets import connect
 
-        connection = connect(self.target)
+        # Cache probes precede start(); prepare the same runtime as a cold boot.
+        # Without a recipe, local connect requires an existing assets config.
+        connection = connect(self.target, template=self._template.resolve())
         try:
             record = connection.call("snapshot_info", reference=self._checkpoint_key())
             return record["verification"]["status"] != "failed"
