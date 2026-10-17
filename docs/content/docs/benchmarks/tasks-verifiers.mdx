@@ -144,6 +144,12 @@ VLM checklist tasks use a checked-in `vlm_checklist.json` file in the task folde
 
 Checklist generation is intentionally separate from task execution. Normal evals assume the checklist already exists.
 
+### Post-hoc reference evidence policy
+
+`gym_anything.verification.vlm_checklist.evaluate_reference_checklist` is an asynchronous, opt-in API for fixed reference criteria and an explicit evidence manifest. Select `scoring_policy: "reference_evidence"`; each item supplies `id`, `criterion`, and `evidence_scope` (`terminal`, `trajectory`, or `auxiliary`). Manifest records supply unique IDs, availability, scope, and image paths or selected state values. An optional query callback can supply an existing application's model transport; otherwise the API uses `query_vlm`.
+
+Results distinguish PASS (1), FAIL (0), UNOBSERVABLE (null), and ERROR (null), with reasoning and validated evidence references. Missing evidence is unobservable; malformed, incomplete, duplicate, or out-of-scope judgments are errors. Terminal criteria cannot cite earlier trajectory frames. Callers own evidence loading and provenance, interpretation of references, and Boolean group aggregation. This API performs no environment lifecycle or artifact discovery. Existing task-completion/integrity and external binary outcome policies retain their grading behavior.
+
 ## External binary outcome checklists and Harbor export
 
 The Harbor compiler accepts `instruction`, `verifier_bundle`, and `packaging_mode` keyword arguments. A bundle directory contains an authoritative `checklist.json` and arbitrary provenance assets. It is packaged under `environment/verifier/`; both Docker and the custom Gym backend resolve the same file outside the agent-controlled guest. A missing or altered bundle fails closed rather than using the task's program verifier or canonical checklist.
