@@ -106,7 +106,7 @@ Desktop not ready after 120s
 - Previous instance not fully cleaned up
 
 **Solutions:**
-- Kill any lingering QEMU processes: `pkill -f "ga_qemu_"`
+- QEMU only: kill any lingering QEMU processes: `pkill -f "ga_qemu_"`
 - Increase timeout if needed
 - Check systemd is working in container
 

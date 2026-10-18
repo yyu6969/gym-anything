@@ -41,7 +41,7 @@ Read these files to understand the framework architecture:
 | `src/gym_anything/runtime/runners/base.py` | Base runner interface - what methods runners provide |
 | `src/gym_anything/runtime/runners/qemu_apptainer.py` | QEMU runner - how VMs are started, hooks executed |
 
-IMPORTANT: We have to use qemu_apptainer runner and not the docker one, since we don't have access to the docker daemon on the host machine. You can run docker inside the qemu vm if there is an absolute need for it.
+IMPORTANT: Use the application runner requested by the invocation and record it explicitly in env.json ("runner": "sandweave" for Sandweave). If no runner is requested, retain the existing QEMU workflow. For QEMU, use qemu_apptainer rather than host Docker; Docker may run inside the guest. Sandweave does not require QEMU, KVM, or QEMU SSH; use Gym runner APIs for testing.
 
 ### 1.2 Understand the Lifecycle
 
@@ -260,6 +260,7 @@ Start with this template:
   "id": "<app>_env@0.1",
   "version": "0.1",
   "base": "ubuntu-gnome-systemd_highres",
+  "runner": "<requested runner, or qemu when unspecified>",
   "description": "<App Name> environment for <purpose>",
   "resources": {
     "cpu": 4,
@@ -520,6 +521,8 @@ Use the live environment with xdotool and screenshot-based UI grounding to verif
 
 ### 6.2 Start the Environment
 
+For Sandweave, keep the same reset/test/close lifecycle but replace the SSH snippets below with `env.runner.exec(...)`, `env.runner.capture_screenshot(host_path)`, and `env.runner.copy_from(guest_path, host_path)`. SSH examples apply only to QEMU.
+
 ```python
 from gym_anything.api import from_config
 import paramiko
@@ -655,8 +658,7 @@ env = from_config("benchmarks/cua_world/environments/<app>_env", task_id="<task_
 obs = env.reset(seed=42, use_cache=False)
 
 # Verify everything works
-ssh_port = env._runner.ssh_port
-print(f"Environment started on SSH port {ssh_port}")
+print(f"Environment started with {env.runner_name}")
 ```
 
 ### 7.2 Verify Checklist

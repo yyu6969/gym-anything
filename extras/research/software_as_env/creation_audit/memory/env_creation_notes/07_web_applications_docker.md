@@ -15,7 +15,7 @@ Web applications present unique challenges for gym_anything environments compare
 
 ### Docker Inside QEMU Works
 
-The gym_anything QEMU VM supports running Docker:
+The gym_anything QEMU and Sandweave guests support running Docker; QEMU is not required when Sandweave is selected:
 
 ```bash
 # In pre_start hook
@@ -25,7 +25,7 @@ systemctl start docker
 usermod -aG docker ga
 ```
 
-**Performance**: With KVM acceleration, nested containerization has minimal overhead.
+**Performance (QEMU only)**: With KVM acceleration, nested containerization has minimal overhead.
 
 ## Docker Hub Rate Limits (IMPORTANT)
 

@@ -24,6 +24,50 @@ from extras.research.software_as_env.creation_audit import method as ca
 
 TASK_INSTRUCTION = "Enable issue tracking in the 'Acme Labs / sample' project."
 
+
+class RequestedRunnerTests(unittest.TestCase):
+    def test_all_actual_codex_phases_receive_runner_contract(self):
+        for runner in ("sandweave", "qemu"):
+            with self.subTest(runner=runner), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                prompts = []
+                def invoke(binary, prompt, **kwargs):
+                    prompts.append(prompt)
+                    if "audit_prompt.md" in prompt:
+                        (root / "audits/audit_gitlab_env.md").write_text("Inspect the configured runtime.")
+                with (
+                    mock.patch.object(ca, "_resolve_bin", return_value=Path("/tmp/codex")),
+                    mock.patch.object(ca, "_codex_new_session", return_value="auditor-session"),
+                    mock.patch.object(ca, "_codex_invoke", side_effect=invoke),
+                ):
+                    result = ca.run_creation_audit(
+                        software="GitLab", env_dir="gitlab_env", backend="codex", platform="linux",
+                        blind_nudges=1, audit_rounds=1, start_idx=0, session_id="creator-session",
+                        workspace=root, memory_dir=ca._packaged_memory_dir(), audits_dir=root / "audits",
+                        logs_dir=root / "logs", claude_bin=None, codex_bin=None, timeout_sec=60,
+                        runner=runner,
+                    )
+                self.assertEqual(result, 0)
+                self.assertEqual(len(prompts), 5)
+                for prompt in prompts:
+                    self.assertIn(f"Requested application runner: {runner}", prompt)
+                    self.assertIn(f'"runner": "{runner}"', prompt)
+                self.assertIn("/env_creation_notes/prompt.md", prompts[0])
+                self.assertIn("reread @", prompts[1])
+
+    def test_active_guidance_keeps_qemu_conditional_and_sandweave_uses_runner_api(self):
+        notes = ca._packaged_memory_dir() / "env_creation_notes"
+        text = (notes / "prompt.md").read_text()
+        self.assertNotIn("We have to use qemu_apptainer", text)
+        self.assertIn('"runner": "sandweave"', text)
+        self.assertIn("If no runner is requested, retain the existing QEMU workflow", text)
+        self.assertIn("SSH examples apply only to QEMU", text)
+        self.assertIn("env.runner.capture_screenshot(host_path)", text)
+        self.assertIn("For QEMU, use qemu_apptainer", text)
+        guide = (notes / "03_interactive_testing.md").read_text()
+        self.assertIn("For Sandweave, use `env.runner.exec", guide)
+        self.assertIn("QEMU process-cleanup examples are QEMU-only", guide)
+
 VALID_ENVIRONMENT_SPEC = {
     "software": {"name": "GitLab", "version": None},
     "entities": [

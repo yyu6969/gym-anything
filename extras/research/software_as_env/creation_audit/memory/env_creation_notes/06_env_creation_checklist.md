@@ -51,6 +51,8 @@ chmod +x benchmarks/cua_world/environments/<env_name>/tasks/*/*.sh
 
 ### Step-by-Step
 
+For Sandweave, use Gym runner execution, screenshot, and file-transfer APIs instead of the QEMU-only SSH examples below.
+
 1. **Start environment with task:**
    ```python
    env = from_config("benchmarks/cua_world/environments/<env_name>", task_id="<task_name>")

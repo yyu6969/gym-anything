@@ -50,6 +50,8 @@ This applies to:
 
 ## Step 1: Start the Environment
 
+For Sandweave, use `env.runner.exec(...)`, `env.runner.capture_screenshot(host_path)`, and `env.runner.copy_from(guest_path, host_path)` instead of the SSH snippets below. Close it with `env.close()`; the SSH and QEMU process-cleanup examples are QEMU-only.
+
 ```python
 from gym_anything.api import from_config
 

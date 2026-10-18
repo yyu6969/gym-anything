@@ -331,7 +331,7 @@ env.close()
 
 ## Web Application Pattern (Docker inside QEMU)
 
-For complex web applications (like OpenEMR), use Docker containers inside the QEMU VM:
+For complex web applications (like OpenEMR), use Docker containers inside the selected QEMU or Sandweave guest; this pattern does not require QEMU when Sandweave is selected:
 
 ### install_app.sh
 ```bash

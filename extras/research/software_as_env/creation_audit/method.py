@@ -349,11 +349,18 @@ def _path_context_prompt(
     reference_root: Path | None,
     workspace: Path | None,
     environment_dir: Path | None,
+    runner: str | None = None,
 ) -> str:
     """Render explicit path ownership without changing the legacy defaults."""
 
+    runtime = (
+        f"\n\nRequested application runner: {runner}. Write an explicit \"runner\": \"{runner}\" "
+        "in env.json and test with that runner. For Sandweave use Gym runner APIs, "
+        "not QEMU, KVM or QEMU SSH; retain QEMU instructions only for QEMU."
+        if runner is not None else ""
+    )
     if reference_root is None and workspace is None and environment_dir is None:
-        return ""
+        return runtime
     if reference_root is None or workspace is None or environment_dir is None:
         raise ValueError(
             "reference_root, workspace, and environment_dir must be supplied together"
@@ -376,6 +383,7 @@ def _path_context_prompt(
         "./tasks, and ./artifacts. Guest paths may still use runtime filesystem "
         "locations such as /workspace/scripts, /workspace/config, /workspace/assets, "
         "and /workspace/tasks."
+        + runtime
     )
 
 
@@ -600,6 +608,7 @@ def _initial_prompt(
     creation_mode: str | None = None,
     canonical_environment_id: str | None = None,
     protected_task_names: Sequence[str] = (),
+    runner: str | None = None,
 ) -> str:
     target = environment_dir.as_posix() if environment_dir is not None else env_dir
     prompt = (
@@ -630,6 +639,7 @@ def _initial_prompt(
             reference_root=reference_root,
             workspace=workspace,
             environment_dir=environment_dir,
+            runner=runner,
         )
     )
 
@@ -648,6 +658,7 @@ def _nudge_prompt(
     creation_mode: str | None = None,
     canonical_environment_id: str | None = None,
     protected_task_names: Sequence[str] = (),
+    runner: str | None = None,
 ) -> str:
     prompt = (
         f"reread @{_creation_prompt_path(memory_dir, platform)}. "
@@ -659,6 +670,7 @@ def _nudge_prompt(
         reference_root=reference_root,
         workspace=workspace,
         environment_dir=environment_dir,
+        runner=runner,
     )
     if all(
         value is None
@@ -705,6 +717,7 @@ def _audit_explore_prompt(
     reference_root: Path | None = None,
     workspace: Path | None = None,
     environment_dir: Path | None = None,
+    runner: str | None = None,
 ) -> str:
     prompt = (
         "deep explore this repository to understand what it is about, "
@@ -714,6 +727,7 @@ def _audit_explore_prompt(
         reference_root=reference_root,
         workspace=workspace,
         environment_dir=environment_dir,
+        runner=runner,
     )
 
 
@@ -733,6 +747,7 @@ def _audit_run_prompt(
     creation_mode: str | None = None,
     canonical_environment_id: str | None = None,
     protected_task_names: Sequence[str] = (),
+    runner: str | None = None,
 ) -> str:
     audit_file_rel = (audits_dir / f"audit_{env_dir}.md").as_posix()
     target_dir = (
@@ -749,6 +764,7 @@ def _audit_run_prompt(
         reference_root=reference_root,
         workspace=workspace,
         environment_dir=environment_dir,
+        runner=runner,
     )
     if all(
         value is None
@@ -803,6 +819,7 @@ def _audit_feedback_prompt(
     creation_mode: str | None = None,
     canonical_environment_id: str | None = None,
     protected_task_names: Sequence[str] = (),
+    runner: str | None = None,
 ) -> str:
     prompt = (
         f"An independent audit of your progress was performed. Here is the "
@@ -814,6 +831,7 @@ def _audit_feedback_prompt(
         reference_root=reference_root,
         workspace=workspace,
         environment_dir=environment_dir,
+        runner=runner,
     )
     if all(
         value is None
@@ -885,6 +903,7 @@ def run_creation_audit(
     canonical_environment_id: str | None = None,
     protected_task_names: Sequence[str] = (),
     pre_audit_validation: Callable[[], None] | None = None,
+    runner: str | None = None,
 ) -> int:
     if platform not in SUPPORTED_PLATFORMS:
         raise ValueError(
@@ -919,6 +938,8 @@ def run_creation_audit(
         "workspace": workspace if explicit_path_layout else None,
         "environment_dir": resolved_environment_dir if explicit_path_layout else None,
     }
+    if runner is not None:
+        prompt_paths["runner"] = runner
     operation_context = {
         "creation_mode": creation_mode,
         "canonical_environment_id": canonical_environment_id,
