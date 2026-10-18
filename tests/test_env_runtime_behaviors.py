@@ -161,7 +161,7 @@ def _make_env_spec(
 
 class RuntimeBehaviorTests(unittest.TestCase):
     def test_reset_fails_closed_when_required_hook_returns_nonzero(self) -> None:
-        for stage in ("pre_start", "post_start", "pre_task"):
+        for stage in ("pre_start", "post_start", "reset", "pre_task"):
             with self.subTest(stage=stage), tempfile.TemporaryDirectory() as tmp:
                 runner = _FakeRunner()
                 runner.hook_statuses[stage] = 17
@@ -187,6 +187,47 @@ class RuntimeBehaviorTests(unittest.TestCase):
                     self.assertEqual(runner.stop_calls, 1)
                 finally:
                     env.close()
+
+    def test_failed_setup_never_caches_or_grades_an_invalid_baseline(self) -> None:
+        for stage, level in (("pre_start", "pre_start"), ("post_start", "post_start"),
+                             ("reset", "post_task"), ("pre_task", "post_task")):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as tmp:
+                runner = _FakeRunner()
+                runner.supports_checkpoint_caching = lambda: True
+                runner.create_checkpoint = mock.Mock()
+                runner.hook_statuses[stage] = 9
+                spec = _make_env_spec(tmp)
+                task = TaskSpec.from_dict({"id": "task", "hooks": {"pre_task": "false"}}) if stage == "pre_task" else None
+                if stage != "pre_task":
+                    spec.hooks[stage] = "false"
+                with mock.patch.object(GymAnythingEnv, "_select_runner", return_value=runner):
+                    env = GymAnythingEnv(spec, task)
+                env._verifier.evaluate = mock.Mock()
+                try:
+                    with self.assertRaisesRegex(RuntimeError, stage + " hook exited"):
+                        env.reset(use_cache=True, cache_level=level)
+                    runner.create_checkpoint.assert_not_called()
+                    env._verifier.evaluate.assert_not_called()
+                    self.assertIsNone(env.get_session_info())
+                    self.assertEqual(runner.stop_calls, 1)
+                finally:
+                    env.close()
+
+    def test_hook_exception_preserves_original_error_and_stops_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = _FakeRunner()
+            runner.run_hook = mock.Mock(side_effect=TimeoutError("setup deadline"))
+            spec = _make_env_spec(tmp)
+            spec.hooks["post_start"] = "wait-for-service"
+            with mock.patch.object(GymAnythingEnv, "_select_runner", return_value=runner):
+                env = GymAnythingEnv(spec)
+            try:
+                with self.assertRaisesRegex(TimeoutError, "setup deadline"):
+                    env.reset()
+                self.assertEqual(runner.stop_calls, 1)
+                self.assertTrue(env._finalized)
+            finally:
+                env.close()
 
     def test_failed_reset_preserves_diagnostics_before_stopping_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

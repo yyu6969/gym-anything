@@ -112,3 +112,7 @@ keyword arguments are supported by `RemoteGymEnv.step(...)`.
 <Callout type="info">
 Use `capture_observation()` when you want the current screenshot or other observation data without taking another action. This is useful for inspection, debugging, or custom loops.
 </Callout>
+
+## Required setup hooks
+
+`reset()` treats environment `pre_start`, `post_start`, `reset` and task `pre_task` hooks as required setup. A nonzero exit status or exception aborts reset, preserves available failure diagnostics and stops the runner without running task grading. Failed setup is never saved as the checkpoint for that stage. Explicit reset and task initialization scripts also propagate failures. This establishes setup error handling; task-specific scripts and seeds still own restoration of files, repositories and application data.

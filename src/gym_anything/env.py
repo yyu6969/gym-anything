@@ -160,6 +160,41 @@ class GymAnythingEnv:
     # Public API
     def reset(self, seed: Optional[int] = None, use_cache: bool = False,
               cache_level: str = "pre_start", use_savevm: bool = False) -> Dict[str, Any]:
+        """Start from the configured baseline; failed setup never starts an episode."""
+        try:
+            return self._reset(seed, use_cache, cache_level, use_savevm)
+        except BaseException:
+            if self._episode_dir is not None:
+                try:
+                    self._runner.capture_screenshot(str(self._episode_dir / "reset_failure.png"))
+                except Exception:
+                    pass
+                if self.env_spec.diagnostics:
+                    for source in (
+                        "/tmp/firefox_gitlab.log", "/home/ga/env_setup_pre_start.log",
+                        "/home/ga/env_setup_post_start.log", "/home/ga/task_pre_task.log",
+                        "/Users/lume/env_setup_pre_start.log", "/Users/lume/env_setup_post_start.log",
+                        "/Users/lume/task_pre_task.log",
+                    ):
+                        try:
+                            self._runner.copy_from(source, str(self._episode_dir / Path(source).name))
+                        except Exception:
+                            pass
+            # A setup failure is not an agent episode and must not run grading.
+            self._finalized = True
+            try:
+                self.close()
+            except Exception:
+                logger.exception("Cleanup after failed reset failed")
+            raise
+
+    def _run_required_hook(self, command: str, *, stage: str, **kwargs) -> None:
+        status = self._runner.run_hook(command, stage=stage, **kwargs)
+        if status not in (None, 0):
+            raise RuntimeError(f"{stage} hook exited with status {status}")
+
+    def _reset(self, seed: Optional[int] = None, use_cache: bool = False,
+              cache_level: str = "pre_start", use_savevm: bool = False) -> Dict[str, Any]:
         """Reset the environment.
 
         Args:
@@ -355,13 +390,14 @@ class GymAnythingEnv:
                 try:
                     # The world owns command execution; core only names the
                     # stage (law L2).
-                    self._runner.run_hook(self.env_spec.hooks['pre_start'], stage="pre_start")
+                    self._run_required_hook(self.env_spec.hooks['pre_start'], stage="pre_start")
                     if self._reporter:
                         self._reporter.stage_done("pre_start_hook")
                 except Exception as e:
                     logger.warning("pre_start hook failed: %s", e)
                     if self._reporter:
                         self._reporter.stage_fail("pre_start_hook", str(e))
+                    raise
 
         # Create checkpoint after pre_start if this is the target level
         # Also creates when we started from scratch with a higher cache_level target
@@ -389,13 +425,14 @@ class GymAnythingEnv:
                 try:
                     # The world owns command execution; core only names the
                     # stage (law L2).
-                    self._runner.run_hook(self.env_spec.hooks['post_start'], stage="post_start")
+                    self._run_required_hook(self.env_spec.hooks['post_start'], stage="post_start")
                     if self._reporter:
                         self._reporter.stage_done("post_start_hook")
                 except Exception as e:
                     logger.warning("post_start hook failed: %s", e)
                     if self._reporter:
                         self._reporter.stage_fail("post_start_hook", str(e))
+                    raise
 
         # Create checkpoint after post_start if this is the target level
         # Also creates when we loaded from a lower level (e.g., pre_start fallback)
@@ -410,10 +447,7 @@ class GymAnythingEnv:
         if self.env_spec.reset_script:
             self._runner.run_reset(self.env_spec.reset_script, seed=seed)
         elif getattr(self.env_spec, "hooks", None) and self.env_spec.hooks.get("reset"):
-            try:
-                self._runner.run_hook(self.env_spec.hooks['reset'], stage="reset")
-            except Exception:
-                pass
+            self._run_required_hook(self.env_spec.hooks['reset'], stage="reset")
 
         # === PRE_TASK HOOK ===
         # Skip if checkpoint_loaded and checkpoint was at post_task
@@ -424,7 +458,7 @@ class GymAnythingEnv:
                 logger.info("Running pre_task hook")
                 try:
                     hook_timeout = self.task_spec.hooks.pre_task_timeout if self.task_spec.hooks else 600
-                    self._runner.run_hook(
+                    self._run_required_hook(
                         self.task_spec.hooks.pre_task,
                         stage="pre_task",
                         timeout=hook_timeout,
@@ -437,6 +471,7 @@ class GymAnythingEnv:
                     logger.warning("pre_task hook failed: %s", e)
                     if self._reporter:
                         self._reporter.stage_fail("pre_task_hook", str(e))
+                    raise
 
             # === TASK INIT SCRIPT ===
             if self.task_spec and self.task_spec.init.init_script:

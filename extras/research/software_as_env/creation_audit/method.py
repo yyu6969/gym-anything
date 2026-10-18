@@ -516,10 +516,11 @@ def _operation_mode_prompt(
         return (
             "\n\n## Backend Operation Mode\n\n"
             f"Mode: {CREATE_NEW_ENVIRONMENT}\n\n"
-            "The target directory is staging for a new canonical persistent shared "
-            "environment. Create the environment and its first task there. Use the "
-            "software-level environment name supplied above; do not invent a "
-            "task-specific environment identity."
+            "The target directory is staging for one task-owned environment. "
+            "Create exactly one task with its own initial-state setup and assets. "
+            "Use the supplied environment identity; do not discover, extend or "
+            "modify another task's environment or the reference registry. "
+            "Immutable software images and dependencies may be reused."
         )
     if creation_mode != EXTEND_EXISTING_ENVIRONMENT:
         raise ValueError(f"Unknown creation_mode: {creation_mode!r}")
