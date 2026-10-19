@@ -10,9 +10,10 @@ Supported backends:
   - ``openai``    – OpenAI API (GPT-4o, etc.)
   - ``anthropic`` – Anthropic Claude
   - ``gemini``    – Google Gemini via LiteLLM
+  - ``codex_cli`` – Fresh Codex CLI session using cached CODEX_HOME authentication
 
 Configuration is read from environment variables:
-  VLM_BACKEND   : "local" (default), "openai", "anthropic", or "gemini"
+  VLM_BACKEND   : "local" (default), "openai", "anthropic", "gemini", or "codex_cli"
   VLM_MODEL     : Model name (defaults per backend below)
   VLM_BASE_URL  : Base URL for local server (default "http://localhost:8080/v1")
   VLM_API_KEY   : API key for local server (default "EMPTY")
@@ -38,9 +39,14 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import jsonschema
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +59,7 @@ DEFAULT_MODELS = {
     "anthropic": "claude-sonnet-4-5",
     "gemini": "gemini-3-flash-preview",
     "openai": "gpt-4o",
+    "codex_cli": "gpt-6.1-sol",
 }
 
 DEFAULT_LOCAL_URL = "http://localhost:8080/v1"
@@ -355,6 +362,117 @@ def _query_gemini(
         return _error_result(str(e))
 
 
+def _query_codex_cli(
+    prompt: str,
+    image_paths: List[str],
+    config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Run a tool-free, independent verifier with strictly validated JSON output.
+
+    Only cached authentication is copied from CODEX_HOME. User configuration,
+    instructions, agent sessions and unrelated environment variables are excluded.
+    Evidence copies retain the supplied order and bytes; originals are never written.
+    """
+    schema = config.get("output_schema")
+    if not isinstance(schema, dict):
+        return _error_result("codex_cli requires an output_schema in the VLM config")
+    try:
+        jsonschema.Draft202012Validator.check_schema(schema)
+    except jsonschema.SchemaError:
+        return _error_result("codex_cli output_schema is invalid")
+    model = config.get("model", DEFAULT_MODELS["codex_cli"])
+    if not isinstance(model, str) or not model.strip():
+        return _error_result("codex_cli requires a nonempty verification model")
+    executable = shutil.which("codex")
+    if executable is None:
+        return _error_result("codex_cli requires the codex executable on PATH")
+    auth = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "auth.json"
+    if not auth.is_file():
+        return _error_result("codex_cli authentication requires CODEX_HOME/auth.json (run codex login first)")
+    timeout = _int_value(config.get("timeout", os.environ.get("VLM_TIMEOUT", "180")), 180)
+    if timeout <= 0:
+        return _error_result("codex_cli timeout must be positive")
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="gym-vlm-codex-") as temporary:
+            private = Path(temporary)
+            workspace = private / "evidence"
+            workspace.mkdir()
+            home = private / "home"
+            codex_home = home / ".codex"
+            codex_home.mkdir(parents=True)
+            private_auth = codex_home / "auth.json"
+            private_auth.write_bytes(auth.read_bytes())
+            private_auth.chmod(0o600)
+            schema_path = private / "output-schema.json"
+            schema_path.write_text(json.dumps(schema), encoding="utf-8")
+            schema_path.chmod(0o400)
+            output_path = private / "verdict.json"
+            command = [
+                executable, "--no-daemon", "exec", "--ephemeral",
+                "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
+                "--sandbox", "read-only", "--model", model,
+                "--config", 'approval_policy="never"',
+                "--config", 'web_search="disabled"',
+                "--output-schema", str(schema_path),
+                "--output-last-message", str(output_path),
+            ]
+            for feature in (
+                "shell_tool", "unified_exec", "multi_agent", "plugins", "apps",
+                "hooks", "browser_use", "computer_use", "image_generation",
+                "code_mode", "code_mode_host", "view_image", "skill_search",
+            ):
+                command.extend(["--disable", feature])
+            command.extend(["--enable", "skip_host_skill_discovery"])
+            for index, source in enumerate(image_paths):
+                source = Path(source)
+                target = workspace / f"evidence-{index:04d}{source.suffix}"
+                target.write_bytes(source.read_bytes())
+                target.chmod(0o400)
+                command.extend(["--image", str(target)])
+            command.extend(["--", "-"])  # Prompt on stdin, never in process arguments.
+            # Preserve transport/certificate settings, but no API keys, runner
+            # credentials, configuration overrides or shared daemon/session IDs.
+            inherited = (
+                "PATH", "LANG", "LC_ALL", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+                "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+            )
+            child_env = {key: os.environ[key] for key in inherited if key in os.environ}
+            child_env.update(HOME=str(home), CODEX_HOME=str(codex_home))
+            result = subprocess.run(
+                command, input=prompt, text=True, capture_output=True, check=False,
+                cwd=workspace, env=child_env, timeout=timeout,
+            )
+            if result.returncode != 0:
+                # Do not return CLI diagnostics, which can contain credentials.
+                diagnostic = (result.stderr or "").lower()
+                reason = " (authentication failed)" if any(
+                    marker in diagnostic for marker in ("unauthorized", "authentication", "401", "log in", "login")
+                ) else ""
+                return _error_result(f"codex_cli exited with code {result.returncode}{reason}")
+            if not output_path.is_file():
+                return _error_result("codex_cli did not produce a final verification response")
+            response = output_path.read_text(encoding="utf-8")
+            try:
+                def reject_constant(value):
+                    raise ValueError(f"Invalid JSON constant: {value}")
+
+                parsed = json.loads(response, parse_constant=reject_constant)
+                if not isinstance(parsed, dict):
+                    return _error_result("codex_cli verification response must be a JSON object")
+                jsonschema.Draft202012Validator(schema).validate(parsed)
+            except (ValueError, jsonschema.ValidationError):
+                return _error_result("codex_cli returned invalid JSON or a response that violates output_schema")
+            return {"success": True, "response": response, "parsed": parsed, "error": ""}
+    except subprocess.TimeoutExpired:
+        return _error_result(f"codex_cli timed out after {timeout} seconds")
+    except OSError as exc:
+        return _error_result(f"codex_cli could not read evidence/authentication or execute Codex ({type(exc).__name__})")
+    except UnicodeError:
+        return _error_result("codex_cli final verification response is not valid UTF-8")
+
+
 def _error_result(msg: str) -> Dict[str, Any]:
     return {"success": False, "response": "", "parsed": {}, "error": msg}
 
@@ -383,6 +501,8 @@ def query_vlm(
         temperature: Sampling temperature (lower = more deterministic).
         top_p: Top-p sampling parameter.
         config: Optional explicit VLM config. Defaults to environment config.
+            codex_cli requires output_schema; checklist verifiers supply it.
+            CLI sampling/token options are controlled by Codex, not the API options.
 
     Returns:
         Dict with keys:
@@ -392,11 +512,17 @@ def query_vlm(
             error (str): Error message if success is False.
     """
     config = config or get_vlm_config()
+    backend = config["backend"]
+    if backend not in DEFAULT_MODELS:
+        return _error_result(f"unsupported VLM backend: {backend}")
 
     # Merge image lists
     image_list = list(images or [])
     if image:
         image_list = [image] + image_list
+
+    if backend == "codex_cli":
+        return _query_codex_cli(prompt, image_list, config)
 
     # Encode images
     encoded_images: List[Dict[str, str]] = []
@@ -409,14 +535,13 @@ def query_vlm(
             })
 
     # Dispatch to the configured backend
-    backend = config["backend"]
     if backend == "anthropic":
         return _query_anthropic(prompt, encoded_images, config, max_tokens, temperature)
     elif backend == "gemini":
         return _query_gemini(prompt, encoded_images, config, max_tokens, temperature, top_p)
     elif backend == "openai":
         return _query_openai_api(prompt, encoded_images, config, max_tokens, temperature, top_p)
-    else:  # "local" (default)
+    elif backend == "local":
         return _query_local(prompt, encoded_images, config, max_tokens, temperature, top_p)
 
 

@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from ..vlm import DEFAULT_LOCAL_URL, DEFAULT_MODELS, parse_vlm_json, query_vlm
+from ..vlm import DEFAULT_LOCAL_URL, DEFAULT_MODELS, get_vlm_config, parse_vlm_json, query_vlm
 
 
 _VERIFIER_MODE_ENV = "GYM_ANYTHING_VERIFIER_MODE"
@@ -181,13 +181,16 @@ def evaluate_vlm_checklist(
         task_description=_task_description(task_info),
         image_count=len(images),
     )
+    vlm_config = config.to_vlm_config()
+    if config.backend == "codex_cli":
+        vlm_config["output_schema"] = verification_output_schema(checklist)
     response = query_vlm(
         prompt=prompt,
         images=images,
         max_tokens=config.max_tokens,
         temperature=config.temperature,
         top_p=config.top_p,
-        config=config.to_vlm_config(),
+        config=vlm_config,
     )
 
     if not response.get("success"):
@@ -218,6 +221,42 @@ def evaluate_vlm_checklist(
         "verdicts": verdicts,
         "raw_response": response.get("response", ""),
     }
+
+
+def verification_output_schema(checklist: Dict[str, Any]) -> Dict[str, Any]:
+    """Describe the existing prompt's verdict shape, without changing scoring."""
+    def object_schema(properties):
+        return {"type": "object", "properties": properties,
+                "required": list(properties), "additionalProperties": False}
+
+    def items_schema(properties):
+        return {"type": "array", "items": object_schema(properties)}
+
+    string = {"type": "string"}
+    if checklist.get("scoring_policy") == REFERENCE_EVIDENCE_POLICY:
+        return object_schema({"items": items_schema({
+            "id": string,
+            "status": {"type": "string", "enum": ["PASS", "FAIL", "UNOBSERVABLE", "ERROR"]},
+            "evidence_refs": {"type": "array", "items": string},
+            "reasoning": string,
+        })})
+    if checklist.get("schema_version") == "binary_outcome_checklist":
+        return object_schema({
+            "items": items_schema({"id": string, "verdict": {"type": "string", "enum": ["PASS", "FAIL"]},
+                                   "evidence": string}),
+            "overall_reasoning": string,
+        })
+    return object_schema({
+        "task_completion": items_schema({
+            "id": string, "verdict": {"type": "string", "enum": ["pass", "partial", "fail"]},
+            "confidence": {"type": "number"}, "evidence": string,
+        }),
+        "integrity": items_schema({
+            "id": string, "verdict": {"type": "string", "enum": ["pass", "fail"]},
+            "confidence": {"type": "number"}, "evidence": string,
+        }),
+        "overall_reasoning": string,
+    })
 
 
 def build_verification_prompt(
@@ -563,7 +602,10 @@ async def evaluate_reference_checklist(
                                            image_count=len(images), evidence=selected)
         try:
             if query is None:
-                response = await asyncio.to_thread(query_vlm, prompt=prompt, images=images, config=config)
+                vlm_config = config if config is not None else get_vlm_config()
+                if vlm_config.get("backend") == "codex_cli":
+                    vlm_config = {**vlm_config, "output_schema": verification_output_schema(active)}
+                response = await asyncio.to_thread(query_vlm, prompt=prompt, images=images, config=vlm_config)
             else:
                 response = query(prompt=prompt, images=images, checklist=active, evidence=selected)
                 if inspect.isawaitable(response):

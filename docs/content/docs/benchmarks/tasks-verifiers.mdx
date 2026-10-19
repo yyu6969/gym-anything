@@ -144,6 +144,34 @@ VLM checklist tasks use a checked-in `vlm_checklist.json` file in the task folde
 
 Checklist generation is intentionally separate from task execution. Normal evals assume the checklist already exists.
 
+### Codex CLI checklist backend
+
+Set `GYM_ANYTHING_VLM_CHECKLIST_BACKEND=codex_cli` and
+`GYM_ANYTHING_VLM_CHECKLIST_MODEL=gpt-6.1-sol` to use an installed `codex`
+executable for checklist verification. Authenticate with `codex login` first;
+the backend reads `auth.json` from `CODEX_HOME` (default `~/.codex`). It copies
+only authentication into a temporary private home, starts a fresh ephemeral
+session without the shared daemon, and attaches read-only copies of the same
+selected screenshots. Agent history, user configuration, tools and application
+connections are excluded. Temporary files are removed after the query.
+
+The existing checklist prompt, evidence selection, verdict parsing and scoring
+remain in use. JSON Schema constrains the existing verdict format, and the
+response is validated before scoring. Authentication errors, nonzero exits,
+missing output, invalid JSON/schema and timeouts fail verification. Each query
+launches once with `VLM_TIMEOUT` seconds (default 180); API sampling, token and
+retry parameters do not control Codex CLI. Different verification models can
+produce different judgments, so keep the backend and model fixed when comparing
+agents. Gemini and other API backends retain their existing behavior. Unsupported
+backend names fail explicitly.
+
+Direct `query_vlm` callers using `codex_cli` must supply `output_schema` in
+their configuration; checklist verifiers supply the appropriate schema automatically.
+For saved episodes, `VerifierRunner.evaluate` in `vlm_checklist` mode reads local
+trajectory screenshots without starting an environment. Reuse the exported
+checklist, task instruction and frame policy, and write the new report separately
+from the original trial results.
+
 ### Post-hoc reference evidence policy
 
 `gym_anything.verification.vlm_checklist.evaluate_reference_checklist` is an asynchronous, opt-in API for fixed reference criteria and an explicit evidence manifest. Select `scoring_policy: "reference_evidence"`; each item supplies `id`, `criterion`, and `evidence_scope` (`terminal`, `trajectory`, or `auxiliary`). Manifest records supply unique IDs, availability, scope, and image paths or selected state values. An optional query callback can supply an existing application's model transport; otherwise the API uses `query_vlm`.

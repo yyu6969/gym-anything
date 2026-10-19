@@ -30,6 +30,13 @@ The important arguments are:
 - `--agent`: agent class name (e.g. `ClaudeAgent`)
 - `--model`: model identifier (e.g. `claude-opus-4`)
 
+`Qwen3VLAgent` and `Qwen35VLAgent` use `VLM_BASE_URL` (default
+`http://localhost:8080/v1`) and optional `VLM_API_KEY` (unset or empty uses
+`EMPTY`). For authenticated DashScope endpoints, set the matching regional URL
+and key. With Harbor's `CuaWorldAgent`, supply these variables to the Harbor
+process through shell environment variables or `--env-file`; the reference agent
+runs on the host and receives Harbor's selected model unchanged.
+
 Common optional arguments are:
 
 - `--steps`: maximum number of agent steps (default: 50)

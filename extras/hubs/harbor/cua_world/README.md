@@ -167,7 +167,21 @@ Reproduction requirements and steps (mandatory):
 - **Shared cache volume.** Create once per host: `docker volume create harbor-gym-anything-cache`. The first boot of an environment provisions its guest image (minutes to tens of minutes); later trials reuse it via copy-on-write overlays.
 - **Long budgets.** Every task carries the benchmark's uniform protocol budget: 500 model steps and a 6-hour agent timeout.
 - **Grading trust boundary.** The verifier runs in the container, not in the agent-controlled VM, so a compromised guest cannot rewrite its own grades.
-- **Grader key.** Default grading uses a VLM judge; export `GEMINI_API_KEY` before running (Harbor passes it to the verifier phase via `[verifier.env]`). Without it, episodes run but grading fails.
+- **Grader configuration.** Generated `task.toml` files declare no provider credentials. Supply the grader backend, model, base URL and credentials at runtime through Harbor's job `verifier.env` or repeated `--verifier-env KEY=VALUE` flags. Runtime values override the defaults in `environment/gym-anything.json`; the Gemini preset and its `vlm_api_key_var` mapping remain available for compatibility.
+
+For example, a Harbor job can select an OpenAI-compatible Qwen verifier:
+
+```yaml
+verifier:
+  env:
+    VLM_BACKEND: local
+    VLM_MODEL: qwen3.5-plus
+    VLM_BASE_URL: https://dashscope.aliyuncs.com/compatible-mode/v1
+    VLM_API_KEY: ${QWEN_API_KEY}
+```
+
+Export `QWEN_API_KEY` on the Harbor host (or load it with `--env-file`). For the default Gemini preset, pass `--verifier-env 'GEMINI_API_KEY=${GEMINI_API_KEY}'`. Native provider backends accept their corresponding runtime API key variables as well.
+
 - **Platform coverage.** Of the 201 tasks: 168 run Linux guests (images provision automatically from recipes on first boot), 25 run Windows guests and 8 run Android guests. Windows and Android guest images cannot be redistributed for licensing reasons; running those subsets requires supplying the base images into the shared cache volume (the Linux majority needs nothing).
 - The task count (201) is the registry's `long_horizon` split; the paper text says 200.
 
@@ -191,14 +205,14 @@ Environment setup specific to this adapter:
   ```
 - Dataset-specific steps:
   - `docker volume create harbor-gym-anything-cache` (once per host)
-  - `GEMINI_API_KEY` exported: required for the default VLM grading (and for the reference agent when using gemini as the policy); other policy models need their own keys
+  - Grader credentials supplied through runtime `verifier.env` or `--verifier-env`; the default Gemini preset uses `GEMINI_API_KEY`. Supply the policy's credentials separately.
   - The generated task images pip-install gym-anything from the pinned git ref at build time; no manual dataset download is needed
 
 ## Troubleshooting
 
 - `AddTestsDirError` or immediate Docker validation failure: the host lacks `/dev/kvm`, or the `harbor-gym-anything-cache` volume was not created.
 - Environment start timeout on a fresh host: the first boot provisions the guest image inside the container; the compose healthcheck allows 40 minutes (`start_period: 2400s`). Subsequent boots are minutes.
-- Grading fails or rewards are missing: check `GEMINI_API_KEY` is exported (the default VLM grader needs it).
+- Grading fails or rewards are missing: check the runtime verifier backend, model, base URL and credentials; exporting a host key alone does not inject it into a Docker verifier.
 - Agent timeouts: every task allows 6 hours; override with `--override-timeout-sec` or the job YAML if experimenting with smaller step budgets.
 - Disk pressure: guest images and overlays live in the shared volume; prune old overlays with `docker volume` inspection if a host runs many environments.
 

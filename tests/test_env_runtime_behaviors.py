@@ -468,7 +468,7 @@ class RuntimeBehaviorTests(unittest.TestCase):
             )
             with mock.patch.object(GymAnythingEnv, "_select_runner", return_value=runner):
                 env = GymAnythingEnv(_make_env_spec(tmp), task_spec)
-            env._verifier = _FakeVerifier()
+            env._verifier = mock.Mock(wraps=_FakeVerifier())
 
             env.reset(seed=1)
             env.close()
@@ -478,6 +478,31 @@ class RuntimeBehaviorTests(unittest.TestCase):
                 runner.exec_commands,
             )
             self.assertEqual(runner.stop_calls, 1)
+            env._verifier.evaluate.assert_called_once()
+
+    def test_close_without_finalizing_cannot_grade_on_a_later_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = _FakeRunner()
+            task_spec = TaskSpec.from_dict({
+                "id": "demo-task",
+                "hooks": {"post_task": "echo exported"},
+                "success": {"mode": "vlm_checklist"},
+            })
+            with mock.patch.object(GymAnythingEnv, "_select_runner", return_value=runner):
+                env = GymAnythingEnv(_make_env_spec(tmp), task_spec)
+            env._verifier = mock.Mock()
+
+            env.reset(seed=1)
+            episode_dir = env.episode_dir
+            env.close(finalize=False)
+            env.close()
+
+            env._verifier.evaluate.assert_not_called()
+            self.assertFalse(any("echo exported" in command for command in runner.exec_commands))
+            self.assertTrue((episode_dir / "final.png").is_file())
+            self.assertNotIn("verifier", json.loads((episode_dir / "summary.json").read_text()))
+            self.assertIsNone(env._traj_log)
+            self.assertIsNone(env.episode_dir)
 
     def test_close_without_post_task_hook_does_not_sleep(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

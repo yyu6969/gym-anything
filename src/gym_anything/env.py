@@ -833,10 +833,14 @@ class GymAnythingEnv:
         """Apply an optional standardized post-reset setup routine."""
         return apply_post_reset_setup(self, setup_code=setup_code, steps=steps, env_dir=env_dir)
 
-    def close(self) -> None:
+    def close(self, *, finalize: bool = True) -> None:
+        """Close the episode, optionally preserving evidence without hooks or grading."""
         if not self._finalized:
             try:
-                self._complete_episode()
+                if finalize:
+                    self._complete_episode()
+                else:
+                    self._finalize_episode(evaluate=False)
             except Exception:
                 pass
         if self._recorder and self._rec_handle:
@@ -953,7 +957,7 @@ class GymAnythingEnv:
             vcrf=self.env_spec.recording.video_crf,
         )
 
-    def _finalize_episode(self) -> Dict[str, Any]:
+    def _finalize_episode(self, *, evaluate: bool = True) -> Dict[str, Any]:
         if self._finalized:
             return {}
         # Capture final screenshot for potential image verification
@@ -972,7 +976,7 @@ class GymAnythingEnv:
             "end_ts": time.time(),
             "steps": self._step_idx + 1,
         }
-        if self.task_spec:
+        if evaluate and self.task_spec:
             # breakpoint()
             result = self._verifier.evaluate(
                 runner=self._runner,

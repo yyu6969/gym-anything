@@ -2,23 +2,25 @@
 
 import json
 import importlib.util
+import io
+import os
 import shutil
 import subprocess
 import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
 from gym_anything.integrations.harbor.compile import compile_task
 from gym_anything.integrations.harbor.container import (
-    _Runtime, apply_verifier_config, boot_env, load_task_config, rewards_from_verdict,
+    _Runtime, apply_verifier_config, boot_env, finalize_main, load_task_config, rewards_from_verdict,
 )
 from gym_anything.integrations.harbor.packaging import directory_digest
 from gym_anything.verification.vlm_checklist import (
-    build_verification_prompt, compute_scores, evaluate_vlm_checklist,
+    VLMChecklistConfig, build_verification_prompt, compute_scores, evaluate_vlm_checklist,
 )
 
 
@@ -78,6 +80,39 @@ def test_registry_ref_requires_immutable_pin(source, tmp_path):
     task = compile_task("demo_env", "first", tmp_path, env_dir=source, packaging_mode="registry_ref", gym_anything_ref="a" * 40)
     assert not (task / "environment/gym-environment").exists()
     assert "ARG GYM_ANYTHING_REF=" + "a" * 40 in (task / "environment/Dockerfile").read_text()
+
+
+@pytest.mark.parametrize("runtime_source", ["process", "verifier_phase"])
+@pytest.mark.parametrize("backend,key_var", [
+    ("local", "VLM_API_KEY"), ("openai", "OPENAI_API_KEY"),
+    ("anthropic", "ANTHROPIC_API_KEY"), ("gemini", "GEMINI_API_KEY"),
+])
+def test_verifier_runtime_settings_override_task_defaults(source, tmp_path, runtime_source, backend, key_var):
+    out = compile_task("demo_env", "first", tmp_path / "out", env_dir=source)
+    config = load_task_config(out / "environment/gym-anything.json")
+    runtime_env = {"VLM_BACKEND": backend, "VLM_MODEL": "runtime-model",
+                   "VLM_BASE_URL": "https://verifier.example/v1", key_var: "runtime-key"}
+    env = Mock()
+    with patch.dict(os.environ, runtime_env if runtime_source == "process" else {}, clear=True):
+        apply_verifier_config(env, config, runtime_env if runtime_source == "verifier_phase" else None)
+        resolved = VLMChecklistConfig.from_spec({}, env.set_verifier_overrides.call_args.args[0]).to_vlm_config()
+    assert resolved["backend"] == backend
+    assert resolved["model"] == "runtime-model"
+    assert resolved["base_url"] == "https://verifier.example/v1"
+    assert resolved["api_key"] == "runtime-key"
+
+
+def test_finalize_forwards_runtime_settings_and_credentials(tmp_path, monkeypatch):
+    runtime_env = {"VLM_BACKEND": "local", "VLM_MODEL": "qwen3.5-plus",
+                   "VLM_BASE_URL": "https://verifier.example/v1", "VLM_API_KEY": "qwen-key",
+                   "OPENAI_API_KEY": "other-provider-key"}
+    def respond(request, **kwargs):
+        assert json.loads(request.data) == {"env": runtime_env}
+        return io.BytesIO(json.dumps({"reward": 1, "verifier": {"passed": True}}).encode())
+    monkeypatch.setattr("gym_anything.integrations.harbor.container.urlopen", respond)
+    with patch.dict(os.environ, {**runtime_env, "UNRELATED_SECRET": "private"}, clear=True):
+        assert finalize_main(7317, str(tmp_path / "reward.json"), str(tmp_path / "verifier.json")) == 0
+    assert json.loads((tmp_path / "reward.json").read_text())["reward"] == 1
 
 
 def test_snapshot_and_external_bundle_are_portable(source, bundle, tmp_path, monkeypatch):
@@ -186,7 +221,12 @@ def test_snapshot_rejects_external_mount(source, tmp_path):
         compile_task("demo_env", "first", tmp_path / "out", env_dir=source, packaging_mode="vendored_snapshot")
 
 
-def test_docker_runtime_and_custom_backend_share_external_verifier(source, bundle, tmp_path, monkeypatch):
+@pytest.mark.parametrize("runtime_env", [{}, {
+    "VLM_BACKEND": "local", "VLM_MODEL": "qwen3.5-plus",
+    "VLM_BASE_URL": "https://verifier.example/v1", "VLM_API_KEY": "qwen-key",
+    "GEMINI_API_KEY": "legacy-key",
+}])
+def test_docker_runtime_and_custom_backend_share_external_verifier(source, bundle, tmp_path, monkeypatch, runtime_env):
     # Exercise the real backend with only Harbor's interface types replaced.
     # Harbor is optional, and neither path needs a VM for contract testing.
     base = types.ModuleType("harbor.environments.base")
@@ -210,16 +250,18 @@ def test_docker_runtime_and_custom_backend_share_external_verifier(source, bundl
     env.step.return_value = ({}, 0., True, {"verifier": {"passed": False, "score": 75}})
     backend._env = env
     monkeypatch.setattr(backend, "_write_guest_file", Mock())
-    backend._verify_sync()
+    backend._verify_sync(runtime_env)
     custom_overrides = dict(env.set_verifier_overrides.call_args.args[0])
     guest_reward = backend._write_guest_file.call_args_list[0].args
     assert json.loads(guest_reward[1]) == {"reward": 0., "passed": 0., "score": 75.}
     env.step.assert_called_once_with([], mark_done=True)
     env.reset_mock()
-    _Runtime(env, config).finalize()
+    _Runtime(env, config).finalize(runtime_env)
     docker_overrides = env.set_verifier_overrides.call_args.args[0]
     assert docker_overrides == custom_overrides
     assert docker_overrides["GYM_ANYTHING_VLM_CHECKLIST_CHECKLIST"] == str(out / "environment/verifier/checklist.json")
+    for key, value in runtime_env.items():
+        assert docker_overrides[key] == value
     # Grading invoked Gym directly, never a verifier program in the guest.
     env.runner.exec.assert_not_called()
 

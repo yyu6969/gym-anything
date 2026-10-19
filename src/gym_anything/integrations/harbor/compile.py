@@ -210,7 +210,10 @@ parser, conversation history and action feedback are retained.
 - A Linux x86-64 worker kernel >=5.4. No `/dev/kvm` is required.
 - The resources declared in `task.toml`, plus disk for image builds and caches.
 - Network access for pinned Ubuntu/runtime assets, application images and APIs.
-- `GEMINI_API_KEY` for both agent and external VLM grading, supplied at run time.
+- Credentials for the chosen agent and VLM grader, supplied at run time.
+
+Configure grading with runtime `VLM_BACKEND`, `VLM_MODEL`, `VLM_BASE_URL` and
+`VLM_API_KEY` through Harbor's `--verifier-env` flags or job `verifier.env`.
 
 The image installs Sandweave 0.2.41 and its pinned Apptainer tools. The Compose
 profile adds `SYS_ADMIN` for container-local Apptainer mount/namespace operations.
@@ -314,9 +317,6 @@ timeout_sec = {agent_timeout_sec}
 
 [verifier]
 timeout_sec = {verifier_timeout_sec}
-
-[verifier.env]
-GEMINI_API_KEY = "${{GEMINI_API_KEY:-}}"
 
 [metadata.gym_anything]
 {metadata_lines}

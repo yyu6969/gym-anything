@@ -114,7 +114,7 @@ def call_llm(
             logger.debug("Calling local OpenAI-compatible model: %s", model)
             client = openai.OpenAI(
                 base_url=os.environ.get("VLM_BASE_URL", "http://localhost:8080/v1"),
-                api_key="EMPTY",
+                api_key=os.environ.get("VLM_API_KEY") or "EMPTY",
             )
             response = client.chat.completions.create(
                 model=model,

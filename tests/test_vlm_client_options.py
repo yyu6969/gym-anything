@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -15,6 +16,37 @@ class VLMClientOptionsTests(unittest.TestCase):
         if reasoning is not None:
             message.reasoning = reasoning
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    def test_call_llm_uses_optional_vlm_api_key_and_preserves_model(self) -> None:
+        for configured_key in (None, "", "test-dashscope-key"):
+            with self.subTest(configured_key=configured_key):
+                create = mock.Mock(return_value=self._response())
+                client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+                settings = {
+                    "VLM_BASE_URL": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                    "OPENAI_API_KEY": "unrelated-provider-key",
+                    "VLM_MODEL": "unrelated-global-model",
+                }
+                if configured_key is not None:
+                    settings["VLM_API_KEY"] = configured_key
+                with mock.patch.dict(os.environ, settings, clear=True), \
+                     mock.patch.object(llm_clients.openai, "OpenAI", return_value=client) as constructor:
+                    result = llm_clients.call_llm(
+                        [{"role": "user", "content": "hi"}], "qwen3.5-plus", 1.0, 0.95,
+                    )
+                constructor.assert_called_once_with(
+                    base_url=settings["VLM_BASE_URL"], api_key=configured_key or "EMPTY",
+                )
+                self.assertEqual(create.call_args.kwargs["model"], "qwen3.5-plus")
+                self.assertEqual(result, "ok")
+
+    def test_call_llm_preserves_unauthenticated_local_defaults(self) -> None:
+        create = mock.Mock(return_value=self._response())
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(llm_clients.openai, "OpenAI", return_value=client) as constructor:
+            llm_clients.call_llm([{"role": "user", "content": "hi"}], "local-model", 1.0, 0.95)
+        constructor.assert_called_once_with(base_url="http://localhost:8080/v1", api_key="EMPTY")
 
     def test_call_llm_passes_disable_thinking_chat_template_kwargs(self) -> None:
         create = mock.Mock(return_value=self._response())

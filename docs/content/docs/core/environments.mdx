@@ -92,6 +92,8 @@ If you want to finish a task and run its checker, call:
 obs, reward, done, info = env.step([], mark_done=True)
 ```
 
+`close()` also finishes and grades an unfinished episode by default. Use `close(finalize=False)` to stop without post-task hooks or evaluation while retaining the final screenshot, diagnostic logs, recording and trajectory closure. The ungraded summary has no verifier result. Harbor's Gym backend uses this cleanup path; its explicit verifier invokes grading, so `--disable-verification` supports development smoke tests without evaluation during teardown.
+
 An integration that controls its own observation schedule can apply actions
 without the normal post-action delay or screenshot:
 

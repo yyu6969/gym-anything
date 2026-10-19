@@ -81,7 +81,8 @@ class HarborCompileTests(unittest.TestCase):
     def test_task_toml_parses_and_carries_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             out_dir = self._compile_add_border(Path(tmp))
-            config = tomllib.loads((out_dir / "task.toml").read_text())
+            task_toml = (out_dir / "task.toml").read_text()
+            config = tomllib.loads(task_toml)
 
         self.assertEqual(config["schema_version"], "1.3")
         self.assertEqual(config["task"]["name"], "cua-world/gimp_env_all_fast__add_border")
@@ -90,6 +91,8 @@ class HarborCompileTests(unittest.TestCase):
         self.assertGreaterEqual(config["environment"]["build_timeout_sec"], 600)
         self.assertIn("timeout_sec", config["agent"])
         self.assertIn("timeout_sec", config["verifier"])
+        self.assertNotIn("env", config["verifier"])
+        self.assertNotIn("API_KEY", task_toml)
 
     def test_boot_config_matches_the_backend_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

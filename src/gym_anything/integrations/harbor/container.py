@@ -41,7 +41,7 @@ import threading
 import signal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 from urllib.request import Request, urlopen
 
 from .packaging import directory_digest, resolve_asset
@@ -160,17 +160,23 @@ def _external_checklist(config: Dict[str, Any]) -> Path:
     return checklist
 
 
+def _verifier_runtime_env(environ: Mapping[str, str]) -> Dict[str, str]:
+    return {
+        key: value for key, value in environ.items()
+        if key.startswith(("VLM_", "GYM_ANYTHING_VLM_CHECKLIST_"))
+        or key == "GYM_ANYTHING_VERIFIER_MODE" or key.endswith("_API_KEY")
+    }
+
+
 def apply_verifier_config(
     env, config: Dict[str, Any], extra_env: Optional[Dict[str, str]] = None
 ) -> None:
     """(Re)apply the task's verifier overrides (same shape the prime hub
-    loader builds). ``extra_env`` overlays os.environ for the key lookup:
-    Harbor delivers the grader key via ``[verifier.env]`` to the verifier
-    phase's process, so the key may only become available at finalize time.
+    loader builds). Runtime settings override task defaults; ``extra_env``
+    overlays os.environ. Harbor's runtime verifier environment may only
+    become available at finalize time.
     """
     verifier = config.get("verifier") or {}
-    if not verifier and not config.get("verifier_bundle"):
-        return
     lookup = {**os.environ, **(extra_env or {})}
     overrides: Dict[str, str] = {}
     if verifier.get("mode"):
@@ -184,6 +190,7 @@ def apply_verifier_config(
     key_var = verifier.get("vlm_api_key_var")
     if key_var and lookup.get(key_var):
         overrides["VLM_API_KEY"] = lookup[key_var]
+    overrides.update(_verifier_runtime_env(lookup))
     if config.get("verifier_bundle"):
         checklist_path = _external_checklist(config)
         if json.loads(checklist_path.read_text()).get("schema_version") == "binary_outcome_checklist":
@@ -308,8 +315,8 @@ class _Runtime:
             if self._finalize_result is None:
                 if self.policy is not None:
                     self.policy.finish()
-                # The grader key arrives with the verifier phase (Harbor's
-                # [verifier.env]); re-resolve overrides before grading.
+                # Runtime verifier settings arrive with the verifier phase;
+                # re-resolve overrides before grading.
                 apply_verifier_config(self.env, self.config, extra_env)
                 reward, verifier = finalize_episode(self.env)
                 self._finalize_result = {"reward": reward, "verifier": verifier}
@@ -500,11 +507,9 @@ def serve(config_path: str, port: int) -> None:
 
 
 def finalize_main(port: int, reward_path: str, verifier_path: str) -> int:
-    # Harbor resolves [verifier.env] into THIS process's environment; the
-    # serve process booted earlier without it, so forward the credentials.
-    payload = json.dumps(
-        {"env": {k: v for k, v in os.environ.items() if k.endswith("_API_KEY")}}
-    ).encode()
+    # Harbor injects the runtime verifier environment into THIS process;
+    # forward settings and credentials to the already-running serve process.
+    payload = json.dumps({"env": _verifier_runtime_env(os.environ)}).encode()
     request = Request(f"http://127.0.0.1:{port}/finalize", data=payload, method="POST")
     with urlopen(request, timeout=1800) as response:
         result = json.loads(response.read())

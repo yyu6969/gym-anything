@@ -4,6 +4,9 @@ n_concurrent_trials: 4
 environment:
   type: docker
   delete: true
+verifier:
+  env:
+    GEMINI_API_KEY: ${GEMINI_API_KEY}
 agents:
   # The reference computer-use agent: drives the guest VM through the
   # in-container gym-anything runtime and records ATIF trajectories.

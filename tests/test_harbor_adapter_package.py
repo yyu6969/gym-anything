@@ -83,9 +83,8 @@ class AdapterGenerationTests(unittest.TestCase):
             self.assertEqual(ga["benchmark"], "cua_world")
             self.assertEqual(ga["verifier"]["mode"], "vlm_checklist")
             self.assertEqual(ga["verifier"]["vlm_api_key_var"], "GEMINI_API_KEY")
-            self.assertIn(
-                'GEMINI_API_KEY = "${GEMINI_API_KEY:-}"', (out / "task.toml").read_text()
-            )
+            self.assertNotIn("env", config["verifier"])
+            self.assertNotIn("API_KEY", (out / "task.toml").read_text())
             self.assertEqual(
                 out.name, f"{ga['env_name']}__{ga['task_id']}", "id mapping preserved"
             )

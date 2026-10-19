@@ -29,7 +29,8 @@ Contract mapping:
   grading pipeline host-side (the ``post_task`` export hook plus
   ``verifier.py`` via ``env.step(mark_done=True)``), then writes the reward
   file into the guest where Harbor's Verifier collects it. Grading
-  deliberately stays outside the agent-controlled guest.
+  deliberately stays outside the agent-controlled guest. Teardown preserves
+  evidence without grading, including when Harbor disables verification.
 """
 
 from __future__ import annotations
@@ -114,7 +115,7 @@ class GymAnythingEnvironment(BaseEnvironment):
 
     def _stop_sync(self) -> None:
         if self._env is not None:
-            self._env.close()
+            self._env.close(finalize=False)
             self._env = None
 
     # -- gym-anything access -------------------------------------------------
@@ -159,7 +160,7 @@ class GymAnythingEnvironment(BaseEnvironment):
         out_path = f"/tmp/.hb-{token}.out"
         err_path = f"/tmp/.hb-{token}.err"
         wrapped = command if cwd is None else f"cd {shlex.quote(cwd)} && {command}"
-        redirected = f"sh -c {shlex.quote(wrapped)} > {out_path} 2> {err_path}"
+        redirected = f"bash -c {shlex.quote(wrapped)} > {out_path} 2> {err_path}"
         return_code = runner.exec(
             redirected,
             env=env,
