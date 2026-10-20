@@ -40,6 +40,9 @@ import os
 import shutil
 import signal
 import subprocess
+import selectors
+import codecs
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -192,44 +195,122 @@ def _kill_process_group(pgid: int) -> None:
         pass
 
 
+class AgentInvocationError(RuntimeError):
+    def __init__(self, message: str, returncode: int | None = None) -> None:
+        super().__init__(message)
+        self.returncode = returncode
+        self.timed_out = False
+
+
 def _run_agent(
     binary: Path,
     args: list[str],
     timeout: int,
     cwd: Path,
     capture_stdout: bool = False,
+    *,
+    output_path: Path | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
+    environment: dict[str, str] | None = None,
+    lock_fd: int | None = None,
 ) -> str | None:
-    """Run the agent CLI. If it doesn't exit (Bun runtime quirk), kill the
-    process group after `timeout` seconds — we assume the agent finished.
+    """Stream output while enforcing a bounded deadline and successful exit.
+
+    Event callbacks run as lines arrive, including thread identities before a
+    turn ends. A killed process never counts as a successful invocation.
     """
     pgid: int | None = None
-    stdout_data: str | None = None
+    proc: subprocess.Popen | None = None
+    chunks: list[str] = []
+    log = None
+    failure: BaseException | None = None
+    previous_sigterm = None
+    install_handler = threading.current_thread() is threading.main_thread()
+
+    def interrupted(signum: int, frame: object) -> None:
+        raise InterruptedError(f"Agent invocation interrupted by signal {signum}")
+
+    if install_handler:
+        previous_sigterm = signal.signal(signal.SIGTERM, interrupted)
     try:
+        if output_path is not None:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            log = output_path.open("x", encoding="utf-8")
         proc = subprocess.Popen(
             [str(binary)] + args,
             cwd=str(cwd),
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE if capture_stdout else None,
-            stderr=subprocess.STDOUT if capture_stdout else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             start_new_session=True,
             text=True,
+            env=environment,
+            pass_fds=(lock_fd,) if lock_fd is not None else (),
         )
         pgid = os.getpgid(proc.pid)
-        try:
-            if capture_stdout:
-                stdout_data, _ = proc.communicate(timeout=timeout)
-            else:
-                proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            print(
-                f"[creation_audit] agent did not exit after {timeout}s — assuming done, killing."
-            )
-            if capture_stdout and proc.stdout is not None:
-                stdout_data = proc.stdout.read()
+        if on_event is not None:
+            on_event({"type": "aab.process.started", "pid": proc.pid, "pgid": pgid})
+        deadline = time.monotonic() + timeout
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        pending = ""
+        assert proc.stdout is not None
+        with selectors.DefaultSelector() as selector:
+            selector.register(proc.stdout, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"Agent invocation timed out after {timeout}s")
+                if not selector.select(min(remaining, 0.2)):
+                    continue
+                raw = os.read(proc.stdout.fileno(), 65536)
+                value = decoder.decode(raw, final=not raw)
+                if capture_stdout:
+                    chunks.append(value)
+                if not capture_stdout:
+                    print(value, end="", flush=True)
+                if log is not None:
+                    log.write(value)
+                    log.flush()
+                    os.fsync(log.fileno())
+                pending += value
+                if not raw and pending and not pending.endswith("\n"):
+                    pending += "\n"
+                while "\n" in pending:
+                    line, pending = pending.split("\n", 1)
+                    if on_event is not None:
+                        try:
+                            event = json.loads(line)
+                        except ValueError:
+                            continue
+                        if isinstance(event, dict):
+                            on_event(event)
+                if not raw:
+                    selector.unregister(proc.stdout)
+            proc.wait(timeout=max(0.01, deadline - time.monotonic()))
+        if proc.returncode != 0:
+            raise AgentInvocationError(f"Agent invocation failed with exit code {proc.returncode}", proc.returncode)
+    except BaseException as exc:
+        failure = exc
+        raise
     finally:
         if pgid is not None:
             _kill_process_group(pgid)
-    return stdout_data
+        if proc is not None:
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if failure is not None:
+                failure.returncode = proc.returncode
+                failure.timed_out = isinstance(failure, (TimeoutError, subprocess.TimeoutExpired))
+        if log is not None:
+            log.close()
+        if install_handler:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+    return "".join(chunks) if capture_stdout else None
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +340,10 @@ def _claude_invoke(
     resume: bool,
     workspace: Path,
     timeout: int,
+    output_path: Path | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
+    model: str | None = None,
+    lock_fd: int | None = None,
 ) -> None:
     args = [
         "-p",
@@ -270,7 +355,10 @@ def _claude_invoke(
     if session_id is None:
         raise ValueError("Claude backend requires a session_id")
     args += ["--resume", session_id] if resume else ["--session-id", session_id]
-    _run_agent(binary, args, timeout, cwd=workspace)
+    if model is not None:
+        args += ["--model", model]
+    _run_agent(binary, args, timeout, cwd=workspace, output_path=output_path,
+               on_event=on_event, lock_fd=lock_fd)
 
 
 def _codex_invoke(
@@ -281,31 +369,49 @@ def _codex_invoke(
     resume: bool,
     workspace: Path,
     timeout: int,
-) -> None:
-    # Codex CLI argv layout: codex --yolo exec [resume <id>] "<prompt>"
-    args = ["--yolo", "exec"]
+    output_path: Path | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
+    environment: dict[str, str] | None = None,
+    model: str | None = None,
+    lock_fd: int | None = None,
+) -> str | None:
+    # Explicitly override a saved cwd when a run was relocated between nodes.
+    args = ["--yolo", "--cd", str(workspace), "exec"]
     if session_id and resume:
         args += ["resume", session_id]
-    args += [prompt]
-    _run_agent(binary, args, timeout, cwd=workspace)
+    if model is not None:
+        args += ["--model", model]
+    args += ["--json", prompt]
+    completed = False
+    failed = False
+    thread_id = session_id
+
+    def event_received(event: dict[str, Any]) -> None:
+        nonlocal completed, failed, thread_id
+        if event.get("type") == "thread.started":
+            emitted = event.get("thread_id")
+            if not isinstance(emitted, str) or not emitted or (session_id and emitted != session_id):
+                raise RuntimeError("Codex returned an unexpected thread identity")
+            thread_id = emitted
+        completed = completed or event.get("type") == "turn.completed"
+        failed = failed or event.get("type") in {"turn.failed", "error"}
+        if on_event is not None:
+            on_event(event)
+
+    _run_agent(binary, args, timeout, cwd=workspace, output_path=output_path,
+               on_event=event_received, environment=environment, lock_fd=lock_fd)
+    if failed or not completed or not thread_id:
+        raise AgentInvocationError("Codex invocation failed or did not emit turn.completed", 0)
+    return thread_id
 
 
 def _codex_new_session(binary: Path, workspace: Path, timeout: int = 60) -> str:
     """Bootstrap a Codex session and extract its resumable session id."""
-    out = _run_agent(
-        binary, ["--yolo", "exec", "hi"], timeout, cwd=workspace, capture_stdout=True
-    )
-    if not out:
-        raise RuntimeError("Codex did not return any output for session bootstrap")
-
-    prefix = "session id:"
-    for line in out.splitlines():
-        stripped = line.strip()
-        if stripped.casefold().startswith(prefix):
-            session_id = stripped[len(prefix) :].strip()
-            if session_id:
-                return session_id
-    raise RuntimeError("Codex bootstrap output did not contain a session id")
+    session_id = _codex_invoke(binary, "hi", session_id=None, resume=False,
+                               workspace=workspace, timeout=timeout)
+    if not session_id:
+        raise RuntimeError("Codex bootstrap output did not contain a session id")
+    return session_id
 
 
 # ---------------------------------------------------------------------------
@@ -904,6 +1010,7 @@ def run_creation_audit(
     protected_task_names: Sequence[str] = (),
     pre_audit_validation: Callable[[], None] | None = None,
     runner: str | None = None,
+    phase_executor: Callable[[str, str, str, Path | None], None] | None = None,
 ) -> int:
     if platform not in SUPPORTED_PLATFORMS:
         raise ValueError(
@@ -950,7 +1057,12 @@ def run_creation_audit(
         task_instruction=task_instruction,
     )
 
-    if backend == "cc":
+    if phase_executor is not None:
+        # The caller owns durable invocation/session state; prompt assembly and
+        # phase order remain here, shared with the standalone loop.
+        if backend not in {"cc", "codex"}:
+            raise ValueError(f"Unknown backend: {backend}")
+    elif backend == "cc":
         binary = _resolve_bin(claude_bin, "CLAUDE_BIN", "claude")
         invoke = lambda prompt, *, resume: _claude_invoke(
             binary,
@@ -976,6 +1088,24 @@ def run_creation_audit(
         )
     else:
         raise ValueError(f"Unknown backend: {backend!r}; expected 'cc' or 'codex'")
+
+    audit_sessions: dict[str, str] = {}
+
+    def execute_phase(name: str, role: str, prompt: str, artifact: Path | None = None) -> None:
+        if phase_executor is not None:
+            phase_executor(name, role, prompt, artifact)
+            return
+        if artifact is not None and artifact.exists():
+            artifact.rename(artifact.with_name(f"previous-{uuid.uuid4().hex}.md"))
+        if role == "creator":
+            invoke(prompt, resume=backend == "codex" or name != "generation")
+            return
+        fresh = role not in audit_sessions
+        if fresh:
+            audit_sessions[role] = str(uuid.uuid4()) if backend == "cc" else _codex_new_session(binary, workspace)
+        agent = _claude_invoke if backend == "cc" else _codex_invoke
+        agent(binary, prompt, session_id=audit_sessions[role],
+              resume=backend == "codex" or not fresh, workspace=workspace, timeout=timeout_sec)
 
     log_path = logs_dir / f"{env_dir}.txt"
     if explicit_path_layout:
@@ -1048,7 +1178,8 @@ def run_creation_audit(
     # Phase 1: initial creation pass
     if start_idx <= 0:
         print("\n=== Initial Attempt ===")
-        invoke(
+        execute_phase(
+            "generation", "creator",
             _initial_prompt(
                 software,
                 env_dir,
@@ -1065,7 +1196,6 @@ def run_creation_audit(
             # Its session was bootstrapped above, so keep the actual creation
             # prompt in that same resumable session. Claude can start directly
             # with the UUID supplied by this workflow.
-            resume=backend == "codex",
         )
         append_log("Initial Attempt Completed")
     else:
@@ -1078,7 +1208,8 @@ def run_creation_audit(
             print(f"Skipping blind nudge {phase_idx}")
             continue
         print(f"\n=== Blind Nudge {phase_idx} ===")
-        invoke(
+        execute_phase(
+            f"nudge-{i + 1}", "creator",
             _nudge_prompt(
                 memory_dir,
                 platform,
@@ -1090,7 +1221,6 @@ def run_creation_audit(
                 **operation_context,
                 **prompt_paths,
             ),
-            resume=True,
         )
         append_log(f"Blind Nudge {phase_idx} Completed")
 
@@ -1106,78 +1236,28 @@ def run_creation_audit(
             print(f"Skipping audit round {i + 1}")
             continue
         print(f"\n=== Audit Round {i + 1} ===")
+        round_dir = audits_dir / f"round-{i + 1}"
+        round_dir.mkdir(parents=True, exist_ok=True)
+        audit_path = round_dir / f"audit_{env_dir}.md"
         # The auditor uses its own fresh session so it can't see the
         # creation agent's chain-of-thought.
-        if backend == "cc":
-            audit_session = str(uuid.uuid4())
-            _claude_invoke(
-                binary,
-                _audit_explore_prompt(**prompt_paths),
-                session_id=audit_session,
-                resume=False,
-                workspace=workspace,
-                timeout=timeout_sec,
-            )
-            _claude_invoke(
-                binary,
-                _audit_run_prompt(
-                    env_dir,
-                    audits_dir,
-                    memory_dir,
-                    platform,
-                    environment_spec,
-                    task_instruction,
-                    environment_initial_state,
-                    software,
-                    video=video_path,
-                    **operation_context,
-                    **prompt_paths,
-                ),
-                session_id=audit_session,
-                resume=True,
-                workspace=workspace,
-                timeout=timeout_sec,
-            )
-        else:
-            audit_session = _codex_new_session(binary, workspace)
-            _codex_invoke(
-                binary,
-                _audit_explore_prompt(**prompt_paths),
-                session_id=audit_session,
-                resume=True,
-                workspace=workspace,
-                timeout=timeout_sec,
-            )
-            _codex_invoke(
-                binary,
-                _audit_run_prompt(
-                    env_dir,
-                    audits_dir,
-                    memory_dir,
-                    platform,
-                    environment_spec,
-                    task_instruction,
-                    environment_initial_state,
-                    software,
-                    video=video_path,
-                    **operation_context,
-                    **prompt_paths,
-                ),
-                session_id=audit_session,
-                resume=True,
-                workspace=workspace,
-                timeout=timeout_sec,
-            )
+        execute_phase(f"audit-{i + 1}-explore", f"auditor-{i + 1}", _audit_explore_prompt(**prompt_paths))
+        append_log(f"Audit Round {i + 1} Exploration Completed")
+        execute_phase(
+            f"audit-{i + 1}-report", f"auditor-{i + 1}",
+            _audit_run_prompt(env_dir, round_dir, memory_dir, platform, environment_spec,
+                              task_instruction, environment_initial_state, software,
+                              video=video_path, **operation_context, **prompt_paths),
+            audit_path,
+        )
 
-        audit_path = audits_dir / f"audit_{env_dir}.md"
-        if not audit_path.exists():
-            print(
-                f"[creation_audit] audit file missing at {audit_path}; skipping feedback"
-            )
-            append_log(f"Audit Round {i + 1} produced no audit file")
-            continue
+        if not audit_path.is_file() or not audit_path.read_text(encoding="utf-8").strip():
+            raise RuntimeError(f"Audit Round {i + 1} missing or empty audit report: {audit_path}")
+        append_log(f"Audit Round {i + 1} Report Completed")
         audit_text = audit_path.read_text(encoding="utf-8")
-        invoke(
+        shutil.copy2(audit_path, audits_dir / f"audit_{env_dir}.md")
+        execute_phase(
+            f"audit-{i + 1}-feedback", "creator",
             _audit_feedback_prompt(
                 audit_text,
                 environment_spec,
@@ -1188,15 +1268,9 @@ def run_creation_audit(
                 **operation_context,
                 **prompt_paths,
             ),
-            resume=True,
         )
 
-        if i < audit_rounds - 1:
-            # Remove the audit so the next round writes fresh evidence.
-            try:
-                audit_path.unlink()
-            except OSError:
-                pass
+        append_log(f"Audit Round {i + 1} Feedback Completed")
         append_log(f"Audit Round {i + 1} Completed")
 
     print(

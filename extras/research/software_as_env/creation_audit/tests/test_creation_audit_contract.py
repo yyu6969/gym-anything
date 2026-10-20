@@ -34,7 +34,7 @@ class RequestedRunnerTests(unittest.TestCase):
                 def invoke(binary, prompt, **kwargs):
                     prompts.append(prompt)
                     if "audit_prompt.md" in prompt:
-                        (root / "audits/audit_gitlab_env.md").write_text("Inspect the configured runtime.")
+                        (root / "audits/round-1/audit_gitlab_env.md").write_text("Inspect the configured runtime.")
                 with (
                     mock.patch.object(ca, "_resolve_bin", return_value=Path("/tmp/codex")),
                     mock.patch.object(ca, "_codex_new_session", return_value="auditor-session"),
@@ -594,7 +594,7 @@ class CodexSessionTests(unittest.TestCase):
             "session id: 019abcde-1234-7000-8000-0123456789ab\n"
             "codex\nHi!"
         )
-        with mock.patch.object(ca, "_run_agent", return_value=transcript):
+        with mock.patch.object(ca, "_codex_invoke", return_value="019abcde-1234-7000-8000-0123456789ab"):
             session_id = ca._codex_new_session(
                 Path("/tmp/codex"), Path("/tmp/workspace")
             )
@@ -603,7 +603,7 @@ class CodexSessionTests(unittest.TestCase):
 
     def test_new_session_rejects_transcript_without_id(self):
         with (
-            mock.patch.object(ca, "_run_agent", return_value="Hi!"),
+            mock.patch.object(ca, "_codex_invoke", return_value=None),
             self.assertRaisesRegex(RuntimeError, "did not contain a session id"),
         ):
             ca._codex_new_session(Path("/tmp/codex"), Path("/tmp/workspace"))
@@ -618,7 +618,7 @@ class CodexSessionTests(unittest.TestCase):
                     "_codex_new_session",
                     side_effect=["creator-session", "auditor-session"],
                 ) as new_session,
-                mock.patch.object(ca, "_codex_invoke") as invoke,
+                mock.patch.object(ca, "_codex_invoke", side_effect=lambda *a, **k: (root / "audits/round-1/audit_gitlab_env.md").write_text("Audit report") if "audit_prompt.md" in a[1] else None) as invoke,
             ):
                 result = ca.run_creation_audit(
                     software="GitLab",
@@ -640,8 +640,8 @@ class CodexSessionTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(new_session.call_count, 2)
-        self.assertEqual(len(invoke.call_args_list), 3)
-        creator_call, audit_explore_call, audit_run_call = invoke.call_args_list
+        self.assertEqual(len(invoke.call_args_list), 4)
+        creator_call, audit_explore_call, audit_run_call, feedback_call = invoke.call_args_list
         self.assertEqual(creator_call.kwargs["session_id"], "creator-session")
         self.assertTrue(creator_call.kwargs["resume"])
         self.assertEqual(audit_explore_call.kwargs["session_id"], "auditor-session")
@@ -653,7 +653,8 @@ class CodexSessionTests(unittest.TestCase):
         events = []
 
         def invoke(*args, **kwargs):
-            del args, kwargs
+            if "audit_prompt.md" in args[1]:
+                (root / "audits/round-1/audit_gitlab_env.md").write_text("Audit report")
             events.append("agent")
 
         def validate():
@@ -690,7 +691,7 @@ class CodexSessionTests(unittest.TestCase):
                 )
 
         self.assertEqual(events[:2], ["agent", "structural-validation"])
-        self.assertEqual(events.count("agent"), 3)
+        self.assertEqual(events.count("agent"), 4)
 
     def test_pipeline_passes_and_logs_aab_context_separately(self):
         with tempfile.TemporaryDirectory() as tmp:
