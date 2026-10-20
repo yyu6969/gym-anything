@@ -213,6 +213,7 @@ def _run_agent(
     on_event: Callable[[dict[str, Any]], None] | None = None,
     environment: dict[str, str] | None = None,
     lock_fd: int | None = None,
+    display_output: bool = True,
 ) -> str | None:
     """Stream output while enforcing a bounded deadline and successful exit.
 
@@ -266,7 +267,7 @@ def _run_agent(
                 value = decoder.decode(raw, final=not raw)
                 if capture_stdout:
                     chunks.append(value)
-                if not capture_stdout:
+                if not capture_stdout and display_output:
                     print(value, end="", flush=True)
                 if log is not None:
                     log.write(value)
@@ -344,6 +345,7 @@ def _claude_invoke(
     on_event: Callable[[dict[str, Any]], None] | None = None,
     model: str | None = None,
     lock_fd: int | None = None,
+    display_output: bool = True,
 ) -> None:
     args = [
         "-p",
@@ -358,7 +360,7 @@ def _claude_invoke(
     if model is not None:
         args += ["--model", model]
     _run_agent(binary, args, timeout, cwd=workspace, output_path=output_path,
-               on_event=on_event, lock_fd=lock_fd)
+               on_event=on_event, lock_fd=lock_fd, display_output=display_output)
 
 
 def _codex_invoke(
@@ -374,6 +376,7 @@ def _codex_invoke(
     environment: dict[str, str] | None = None,
     model: str | None = None,
     lock_fd: int | None = None,
+    display_output: bool = True,
 ) -> str | None:
     # Explicitly override a saved cwd when a run was relocated between nodes.
     args = ["--yolo", "--cd", str(workspace), "exec"]
@@ -399,7 +402,8 @@ def _codex_invoke(
             on_event(event)
 
     _run_agent(binary, args, timeout, cwd=workspace, output_path=output_path,
-               on_event=event_received, environment=environment, lock_fd=lock_fd)
+               on_event=event_received, environment=environment, lock_fd=lock_fd,
+               display_output=display_output)
     if failed or not completed or not thread_id:
         raise AgentInvocationError("Codex invocation failed or did not emit turn.completed", 0)
     return thread_id
@@ -1175,9 +1179,13 @@ def run_creation_audit(
         with log_path.open("a") as fh:
             fh.write(line + "\n")
 
+    def announce(message: str) -> None:
+        if phase_executor is None:
+            print(message)
+
     # Phase 1: initial creation pass
     if start_idx <= 0:
-        print("\n=== Initial Attempt ===")
+        announce("\n=== Initial Attempt ===")
         execute_phase(
             "generation", "creator",
             _initial_prompt(
@@ -1199,15 +1207,15 @@ def run_creation_audit(
         )
         append_log("Initial Attempt Completed")
     else:
-        print(f"Resuming from index {start_idx}, skipping initial attempt")
+        announce(f"Resuming from index {start_idx}, skipping initial attempt")
 
     # Phase 2: blind nudges
     for i in range(blind_nudges):
         phase_idx = i + 1
         if start_idx > phase_idx:
-            print(f"Skipping blind nudge {phase_idx}")
+            announce(f"Skipping blind nudge {phase_idx}")
             continue
-        print(f"\n=== Blind Nudge {phase_idx} ===")
+        announce(f"\n=== Blind Nudge {phase_idx} ===")
         execute_phase(
             f"nudge-{i + 1}", "creator",
             _nudge_prompt(
@@ -1225,7 +1233,7 @@ def run_creation_audit(
         append_log(f"Blind Nudge {phase_idx} Completed")
 
     if pre_audit_validation is not None:
-        print("\n=== Candidate Structural Validation ===")
+        announce("\n=== Candidate Structural Validation ===")
         pre_audit_validation()
         append_log("Candidate Structural Validation Completed")
 
@@ -1233,9 +1241,9 @@ def run_creation_audit(
     for i in range(audit_rounds):
         phase_idx = blind_nudges + i + 1
         if start_idx > phase_idx:
-            print(f"Skipping audit round {i + 1}")
+            announce(f"Skipping audit round {i + 1}")
             continue
-        print(f"\n=== Audit Round {i + 1} ===")
+        announce(f"\n=== Audit Round {i + 1} ===")
         round_dir = audits_dir / f"round-{i + 1}"
         round_dir.mkdir(parents=True, exist_ok=True)
         audit_path = round_dir / f"audit_{env_dir}.md"
@@ -1273,7 +1281,7 @@ def run_creation_audit(
         append_log(f"Audit Round {i + 1} Feedback Completed")
         append_log(f"Audit Round {i + 1} Completed")
 
-    print(
+    announce(
         f"\nCreation–Audit complete: software={software}, env_dir={env_dir}, "
         f"session={session_id}"
     )
