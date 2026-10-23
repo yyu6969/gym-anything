@@ -1,0 +1,35 @@
+[
+  {
+    "name": "task448_step1",
+    "source": "jobs/448_2026-10-19__13-11-07/gitlab_task_webarena_448_env__up__vvVkS4H/agent/responses.json",
+    "step": 1,
+    "resolution": [
+      1920,
+      1080
+    ],
+    "response": "Action: Click on the user avatar icon located in the top-right corner of the GitLab navigation bar.\n\n<tool_call>\n<function=computer_use>\n<parameter=action>\nleft_click\n</parameter>\n<parameter=coordinate>\n[966, 124]\n</parameter>\n</function>\n</tool_call>",
+    "sha256": "3231ffb4ab73365964ed1babc2ffeb85627efd94cabc3397b04f13fe756c38d9"
+  },
+  {
+    "name": "task449_step1",
+    "source": "jobs/2026-10-21__11-57-48/gitlab_task_webarena_449_env__se__gv3aXEW/agent/responses.json",
+    "step": 1,
+    "resolution": [
+      1680,
+      1050
+    ],
+    "response": "Action: Click on the user profile avatar located in the top-right corner of the GitLab interface to open the user menu.\n\n<tool_call>\n<parameter=action>\nleft_click\n</parameter>\n<parameter=coordinate>\n[960, 130]\n</parameter>\n</function>\n</tool_call>",
+    "sha256": "570a3aa04dcc78079aad246f3e7a37750d74d8560a3ee2b4471de1d001a3c8fc"
+  },
+  {
+    "name": "task449_step33",
+    "source": "jobs/2026-10-21__11-57-48/gitlab_task_webarena_449_env__se__gv3aXEW/agent/responses.json",
+    "step": 33,
+    "resolution": [
+      1680,
+      1050
+    ],
+    "response": "Action: Scroll down three units at the center of the page to view additional projects or content below the current viewport.\n\n<tool_call>\n<parameter=action>\nmouse_move\n</parameter>\n<parameter=coordinate>\n[500, 554]\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=computer_use>\n<parameter=action>\nscroll\n</parameter>\n<parameter=pixels>\n-3\n</parameter>\n</function>\n</tool_call>",
+    "sha256": "a4b154287854c1c2b967fa064e911334de1aa685ab732470393c8ad1a61f47e3"
+  }
+]

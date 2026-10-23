@@ -37,6 +37,18 @@ and key. With Harbor's `CuaWorldAgent`, supply these variables to the Harbor
 process through shell environment variables or `--env-file`; the reference agent
 runs on the host and receives Harbor's selected model unchanged.
 
+### Qwen3.5 parsing and diagnostics
+
+`Qwen35VLAgent` accepts its existing XML and JSON computer-use formats. It validates every tool call before returning an action group, then executes the validated calls in order. If any block has invalid syntax, an explicitly different function name, an unsupported action or invalid arguments, the entire turn raises `Qwen35ParseError` before environment execution. Parsing failures do not trigger another model call or become empty environment steps. A terminal or answer call must be last.
+
+The one recovery rule accepts parameter blocks followed by `</function>` when the opening `<function=computer_use>` is missing. Recovery requires exactly one configured compatible tool, named `computer_use`, and arguments that validate against that tool's schema. The original model text is never rewritten. Every recovered block records `missing_opening_function_declaration` and retains both its original arguments and recovered call. Explicitly named other functions and ambiguous tool selections cannot use this rule.
+
+Intentional controls remain distinct from parse failures: `wait` produces a wait control action, including zero-duration waits. Explicit `screenshot` and `noop` calls request a fresh observation; a zero-wheel scroll also produces an explicit observation control. Empty typed text is an intentional no-op, and terminal calls can legitimately have no actions. These parser controls do not change the system prompt or advertised model configuration. Multiple calls retain waits and GUI actions in their original order.
+
+`responses.json` retains the extracted model text and parsed responses. Each parsed response's `metadata.parsing` records the validation policy, original tool blocks/arguments, validated calls, recovered calls and reasons, planned actions, intent and errors. On rejection, these records are saved before the error reaches the runtime. Successful Harbor ATIF tool calls retain this parsing metadata in `extra.parsing`, with the completed action group in `extra.execution.executed_actions`. A rejected model turn is recorded at step level with `extra.execution.status=rejected`, no executed actions and no fabricated tool call.
+
+Set `VLM_RETAIN_RESPONSE_METADATA=1` in the host process to additionally retain an allowlisted provider summary for Qwen3.5 turns: native tool-call field presence, populated presence/count, legacy function-call presence, content/reasoning presence, finish reason and token counts. Capture is scoped to each model call and leaves the model-call interface and request parameters unchanged. Headers, credentials, arbitrary provider extras, native function arguments and reasoning text are excluded. This summary distinguishes an omitted native field from a present but empty field; it does not preserve the full provider response or establish why an XML declaration was omitted upstream. Native-only responses are rejected explicitly rather than interpreted as text or executed implicitly.
+
 Common optional arguments are:
 
 - `--steps`: maximum number of agent steps (default: 50)

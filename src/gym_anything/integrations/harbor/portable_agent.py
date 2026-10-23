@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import copy
 from pathlib import Path
 import shlex
 from typing import Optional
@@ -31,6 +32,7 @@ class _TrajectoryRecorder:
         groups: list,
         screenshot_path: Optional[Path],
         usage: Optional[dict] = None,
+        parsing_failure: Optional[dict] = None,
     ) -> None:
         step_id = len(self._steps) + 1
         tool_calls = [
@@ -38,6 +40,10 @@ class _TrajectoryRecorder:
                 tool_call_id=f"step{step_id}-{idx}",
                 function_name="computer_use",
                 arguments={"actions": group.get("actions") or []},
+                extra=copy.deepcopy({
+                    "parsing": group["metadata"]["parsing"],
+                    "execution": {"status": "completed", "executed_actions": group.get("actions") or []},
+                }) if "parsing" in (group.get("metadata") or {}) else None,
             )
             for idx, group in enumerate(groups or [])
         ]
@@ -68,6 +74,9 @@ class _TrajectoryRecorder:
                 observation=observation,
                 metrics=Metrics(prompt_tokens=usage.get("prompt_tokens"),
                                 completion_tokens=usage.get("completion_tokens")) if usage else None,
+                extra=copy.deepcopy({"parsing": parsing_failure,
+                                     "execution": {"status": "rejected", "executed_actions": []}})
+                if parsing_failure is not None else None,
             )
         )
 

@@ -42,6 +42,7 @@ import signal
 import subprocess
 import selectors
 import codecs
+import tempfile
 import threading
 import time
 import uuid
@@ -214,6 +215,7 @@ def _run_agent(
     environment: dict[str, str] | None = None,
     lock_fd: int | None = None,
     display_output: bool = True,
+    stdin_text: str | None = None,
 ) -> str | None:
     """Stream output while enforcing a bounded deadline and successful exit.
 
@@ -224,6 +226,7 @@ def _run_agent(
     proc: subprocess.Popen | None = None
     chunks: list[str] = []
     log = None
+    stdin_file = None
     failure: BaseException | None = None
     previous_sigterm = None
     install_handler = threading.current_thread() is threading.main_thread()
@@ -237,10 +240,16 @@ def _run_agent(
         if output_path is not None:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             log = output_path.open("x", encoding="utf-8")
+        if stdin_text is not None:
+            # File-backed stdin avoids argv limits and blocking pipe writes
+            # before output streaming, timeout and interruption handling begin.
+            stdin_file = tempfile.TemporaryFile()
+            stdin_file.write(stdin_text.encode("utf-8"))
+            stdin_file.seek(0)
         proc = subprocess.Popen(
             [str(binary)] + args,
             cwd=str(cwd),
-            stdin=subprocess.DEVNULL,
+            stdin=stdin_file if stdin_file is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -309,6 +318,8 @@ def _run_agent(
                 failure.timed_out = isinstance(failure, (TimeoutError, subprocess.TimeoutExpired))
         if log is not None:
             log.close()
+        if stdin_file is not None:
+            stdin_file.close()
         if install_handler:
             signal.signal(signal.SIGTERM, previous_sigterm)
     return "".join(chunks) if capture_stdout else None
@@ -384,7 +395,7 @@ def _codex_invoke(
         args += ["resume", session_id]
     if model is not None:
         args += ["--model", model]
-    args += ["--json", prompt]
+    args += ["--json", "-"]
     completed = False
     failed = False
     thread_id = session_id
@@ -403,7 +414,7 @@ def _codex_invoke(
 
     _run_agent(binary, args, timeout, cwd=workspace, output_path=output_path,
                on_event=event_received, environment=environment, lock_fd=lock_fd,
-               display_output=display_output)
+               display_output=display_output, stdin_text=prompt)
     if failed or not completed or not thread_id:
         raise AgentInvocationError("Codex invocation failed or did not emit turn.completed", 0)
     return thread_id

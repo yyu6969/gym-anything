@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
 
 from agents.agents.qwen3vl import Qwen3VLAgent
+from agents.shared.llm_clients import capture_provider_metadata
 
 GRID_MAX = 999.0
 SCROLL_STEP_LIMIT = 10
@@ -20,6 +21,18 @@ _MOUSE_ACTIONS = {
     "left_click", "click", "right_click", "middle_click", "double_click",
     "triple_click", "left_click_drag", "drag", "scroll", "mouse_move",
 }
+
+
+class Qwen35ParseError(ValueError):
+    """A rejected model turn: diagnostics exist, but no actions may execute."""
+
+    def __init__(self, response, parsed_response):
+        self.response_text = response if isinstance(response, str) else ""
+        self.parsed_response = parsed_response
+        self.parsing_diagnostics = parsed_response["metadata"]["parsing"]
+        super().__init__("Qwen3.5 computer-use parsing failed: " + "; ".join(
+            error["message"] for error in self.parsing_diagnostics["errors"]
+        ))
 
 
 class Qwen35VLAgent(Qwen3VLAgent):
@@ -41,7 +54,8 @@ class Qwen35VLAgent(Qwen3VLAgent):
       - Context-length backoff: on model-call failure the messages are rebuilt
         with progressively smaller (history_n, image_max, fold_size) variants.
       - XML <function=...><parameter=...> tool calls with a JSON fallback;
-        every <tool_call> block in a response is executed.
+        all blocks must validate before any execute. A missing opening
+        function declaration is recoverable only for the sole compatible tool.
       - `keys` on mouse actions become a real hold (keys_down / action /
         keys_up); scroll steps are clamped to +/-10 and sign-inverted
         (Qwen negative=down -> runner positive=down).
@@ -363,6 +377,7 @@ class Qwen35VLAgent(Qwen3VLAgent):
         self.b64_to_path[processed_image_b64] = processed_path
 
         response = None
+        received_response = False
         last_exc: Optional[Exception] = None
         for history_n, image_max, fold_size in self._context_variants():
             messages = self.build_messages(
@@ -375,14 +390,16 @@ class Qwen35VLAgent(Qwen3VLAgent):
                 self.save_messages(messages)
             try:
                 print(f"Calling LLM with temperature: {self.temperature}")
-                response = self.llm_call(
-                    messages,
-                    self.model,
-                    self.temperature,
-                    self.top_p,
-                    self.top_k,
-                    self.max_tokens,
-                )
+                with capture_provider_metadata() as provider_metadata:
+                    response = self.llm_call(
+                        messages,
+                        self.model,
+                        self.temperature,
+                        self.top_p,
+                        self.top_k,
+                        self.max_tokens,
+                    )
+                received_response = True
                 if (history_n, image_max, fold_size) != self._context_variants()[0]:
                     print(
                         f"context retry succeeded with history_n={history_n}, "
@@ -398,15 +415,23 @@ class Qwen35VLAgent(Qwen3VLAgent):
                     f"model call failed with history_n={history_n}, "
                     f"image_max={image_max}, fold_size={fold_size}: {exc!r}"
                 )
-        if response is None:
+        if not received_response:
             raise RuntimeError("Qwen3.5 model call failed for all context variants") from last_exc
 
         self.responses.append(response)
+        self.all_model_responses.append(response)
 
         original_width, original_height = self.original_sizes[-1]
-        parsed_response = self._parse_response(response, original_width, original_height)
+        try:
+            parsed_response = self._parse_response(response, original_width, original_height)
+        except Qwen35ParseError as exc:
+            if provider_metadata:
+                exc.parsing_diagnostics["provider_metadata"] = provider_metadata
+            self.all_parsed_responses.append(exc.parsed_response)
+            raise
 
-        self.all_model_responses.append(response)
+        if provider_metadata:
+            parsed_response["metadata"]["parsing"]["provider_metadata"] = provider_metadata
         self.all_parsed_responses.append(parsed_response)
 
         actions = parsed_response["actions"]
@@ -424,45 +449,141 @@ class Qwen35VLAgent(Qwen3VLAgent):
             self.done = True
             return [{"tool_id": tool_id, "actions": actions, "metadata": metadata}]
 
-        if metadata["wait_time"] is not None:
-            return [{
-                "tool_id": tool_id,
-                "actions": [{"action": "wait", "time": metadata["wait_time"]}],
-                "metadata": metadata,
-            }]
-
         return [{"tool_id": tool_id, "actions": actions, "metadata": metadata}]
 
-    # ---- Response parsing (reference-consistent) -------------------------------
+    # ---- Response parsing ------------------------------------------------------
 
     @staticmethod
-    def _parse_json_tool_call(text: str) -> Optional[Dict[str, Any]]:
-        try:
-            parsed = json.loads(text.strip())
-        except json.JSONDecodeError:
+    def _unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate tool argument or field")
+            result[key] = value
+        return result
+
+    def _sole_computer_use_tool(self):
+        tools = self._tools_def()
+        tools = [tools] if isinstance(tools, dict) else tools
+        if not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict):
             return None
-        if isinstance(parsed, dict) and parsed.get("name") == "computer_use":
-            args = parsed.get("arguments", {})
-            return args if isinstance(args, dict) else None
-        if isinstance(parsed, dict) and parsed.get("action"):
-            return parsed
-        return None
-
-    @classmethod
-    def _parse_xml_tool_call(cls, xml_content: str) -> Optional[Dict[str, Any]]:
-        json_call = cls._parse_json_tool_call(xml_content)
-        if json_call is not None:
-            return json_call
-
-        func_match = re.search(r"<function=([^>]+)>", xml_content)
-        if not func_match or func_match.group(1) != "computer_use":
+        function = tools[0].get("function")
+        if tools[0].get("type") != "function" or not isinstance(function, dict) or function.get("name") != "computer_use":
             return None
+        schema = function.get("parameters", {})
+        if not isinstance(schema, dict) or schema.get("type") != "object" or "action" not in schema.get("required", []):
+            return None
+        action = schema.get("properties", {}).get("action", {})
+        return function if action.get("type") == "string" and isinstance(action.get("enum"), list) else None
 
+    def _tool_payloads(self, response):
+        """Read complete blocks; literal tags inside JSON or XML text are data."""
+        decoder = json.JSONDecoder(object_pairs_hook=self._unique_object)
+        starts = list(re.finditer(r'\{\s*"name"\s*:', response))
+        first_tag = response.find("<tool_call")
+        if (first_tag < 0 and "</tool_call" not in response) or (starts and (first_tag < 0 or starts[0].start() < first_tag)):
+            if not starts:
+                raise ValueError("No computer-use tool call found")
+            payloads, end = [], 0
+            for start in starts:
+                if start.start() < end:
+                    continue
+                if "<tool_call" in response[end:start.start()] or "</tool_call" in response[end:start.start()]:
+                    raise ValueError("Mixed or unmatched tool_call tags")
+                _, length = decoder.raw_decode(response[start.start():])
+                end = start.start() + length
+                payloads.append(response[start.start():end])
+            if "<tool_call" in response[end:] or "</tool_call" in response[end:]:
+                raise ValueError("Mixed or unmatched tool_call tags")
+            return payloads
+
+        payloads, cursor = [], 0
+        boundary = re.compile(r"<parameter=[^>]+>.*?</parameter>|</?tool_call[^<>]*>", re.DOTALL)
+        while cursor < len(response):
+            opening = re.search(r"<tool_call[^<>]*>", response[cursor:])
+            if opening is None:
+                if "<tool_call" in response[cursor:] or "</tool_call" in response[cursor:]:
+                    raise ValueError("Unmatched tool_call tags")
+                if re.search(r'\{\s*"name"\s*:', response[cursor:]):
+                    raise ValueError("Mixed tagged and untagged tool calls")
+                break
+            start = cursor + opening.start()
+            if opening.group() != "<tool_call>" or any(tag in response[cursor:start] for tag in ("<tool_call", "</tool_call")):
+                raise ValueError("Malformed tool_call tags")
+            if re.search(r'\{\s*"name"\s*:', response[cursor:start]):
+                raise ValueError("Mixed tagged and untagged tool calls")
+            body = cursor + opening.end()
+            first = body + len(response[body:]) - len(response[body:].lstrip())
+            if response[first:first + 1] == "{":
+                _, length = decoder.raw_decode(response[first:])
+                end = first + length
+                closing = re.match(r"\s*</tool_call>", response[end:])
+                if closing is None:
+                    raise ValueError("Incomplete JSON tool_call block")
+                payloads.append(response[first:end])
+                cursor = end + closing.end()
+                continue
+            for token in boundary.finditer(response, body):
+                if token.group().startswith("<parameter="):
+                    continue
+                if token.group() != "</tool_call>":
+                    raise ValueError("Nested or malformed tool_call block")
+                payloads.append(response[body:token.start()])
+                cursor = token.end()
+                break
+            else:
+                raise ValueError("Incomplete XML tool_call block")
+        if not payloads:
+            raise ValueError("No complete tool_call block found")
+        return payloads
+
+    def _parse_tool_call(self, payload, record):
+        content = payload.strip()
+        if content.startswith("{"):
+            call = json.loads(content, object_pairs_hook=self._unique_object)
+            if not isinstance(call, dict):
+                raise ValueError("Tool call must be an object")
+            if "name" in call:
+                record["function_name"] = call["name"]
+                if call["name"] != "computer_use" or set(call) - {"name", "arguments"}:
+                    raise ValueError("Expected an unambiguous computer_use call")
+                params = call.get("arguments")
+            else:
+                if self._sole_computer_use_tool() is None:
+                    raise ValueError("Unnamed JSON call with ambiguous configured tools")
+                record["function_name"] = "computer_use"
+                params = call
+            record["format"] = "json"
+            record["original_arguments"] = params
+            return params
+
+        record["format"] = "xml"
+        opening = re.match(r"<function=([^>]+)>", content)
+        if opening:
+            record["function_name"] = opening.group(1)
+            if opening.group(1) != "computer_use":
+                raise ValueError("Explicit function name is not computer_use")
+            content = content[opening.end():]
+        elif "<function" in content:
+            raise ValueError("Malformed function declaration")
+        else:
+            if self._sole_computer_use_tool() is None:
+                raise ValueError("Missing function declaration with ambiguous configured tools")
+            record["recovery_reason"] = "missing_opening_function_declaration"
+        if not content.endswith("</function>"):
+            raise ValueError("Missing closing function declaration")
+        content = content[:-len("</function>")]
         params: Dict[str, Any] = {}
+        cursor = 0
         for match in re.finditer(
-            r"<parameter=([^>]+)>(.*?)</parameter>", xml_content, re.DOTALL
+            r"<parameter=([^>]+)>(.*?)</parameter>", content, re.DOTALL
         ):
+            if content[cursor:match.start()].strip():
+                raise ValueError("Unexpected content between tool parameters")
+            cursor = match.end()
             name = match.group(1)
+            if name in params:
+                raise ValueError("Duplicate tool parameter")
             value = match.group(2)
             if name == "text":
                 # Trim exactly one wrapping newline; inner whitespace is content.
@@ -476,13 +597,106 @@ class Qwen35VLAgent(Qwen3VLAgent):
                     value = value[:-1]
             else:
                 value = value.strip()
-            if value.startswith("[") or value.startswith("{"):
+            if name in {"coordinate", "coordinate2", "keys"} and value.startswith(("[", "{")):
                 try:
-                    params[name] = json.loads(value)
+                    params[name] = json.loads(value, object_pairs_hook=self._unique_object)
                     continue
                 except json.JSONDecodeError:
                     pass
             params[name] = value
+        if content[cursor:].strip() or not params:
+            raise ValueError("Malformed or empty tool parameters")
+        record["original_arguments"] = params
+        return params
+
+    def _validate_params(self, params, *, recovering=False):
+        if not isinstance(params, dict):
+            raise ValueError("Tool arguments must be an object")
+        params = dict(params)
+        known = {"action", "coordinate", "coordinate2", "keys", "text", "pixels", "time", "status"}
+        if set(params) - known:
+            raise ValueError("Unsupported computer-use parameter")
+        action = params.get("action")
+        supported = _MOUSE_ACTIONS | {"key", "type", "wait", "terminate", "answer", "screenshot", "noop"}
+        if not isinstance(action, str) or action.strip() not in supported:
+            raise ValueError("Missing or unsupported computer-use action")
+        params["action"] = action = action.strip()
+
+        def number(value):
+            if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+                raise ValueError("Action values must be finite numbers")
+            try:
+                result = float(value)
+            except (ValueError, OverflowError):
+                raise ValueError("Action values must be finite numbers") from None
+            if not math.isfinite(result):
+                raise ValueError("Action values must be finite numbers")
+            return result
+
+        for key in ("coordinate", "coordinate2"):
+            if key not in params:
+                continue
+            point = params[key]
+            if isinstance(point, str):
+                try:
+                    point = json.loads(point)
+                except ValueError:
+                    raise ValueError("Coordinates must contain exactly two finite grid numbers") from None
+            if (not isinstance(point, list) or len(point) != 2
+                    or any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in point)
+                    or any(not math.isfinite(v) or not 0 <= v <= GRID_MAX for v in point)):
+                raise ValueError("Coordinates must contain exactly two finite grid numbers in [0,999]")
+            params[key] = point
+        if action in {"mouse_move", "middle_click", "double_click", "triple_click", "left_click_drag", "drag"} and "coordinate" not in params:
+            raise ValueError("Action requires coordinate")
+        if "keys" in params:
+            keys = params["keys"]
+            if isinstance(keys, str):
+                if len(keys.strip()) > 1 and keys.lstrip().startswith(("[", "{", '"')):
+                    try:
+                        keys = json.loads(keys)
+                    except ValueError:
+                        raise ValueError("Malformed structured keys argument") from None
+                else:
+                    keys = [keys]
+                if isinstance(keys, str):
+                    keys = [keys]
+            if not isinstance(keys, list) or any(not isinstance(k, str) or not k.strip() for k in keys):
+                raise ValueError("keys must be a list of nonempty strings or a key string")
+            params["keys"] = [key.strip() for key in keys]
+        if action == "key" and not params.get("keys"):
+            raise ValueError("key requires nonempty keys")
+        if "text" in params and not isinstance(params["text"], str):
+            raise ValueError("text must be a string")
+        if action in {"type", "answer"} and "text" not in params:
+            raise ValueError("Action requires text")
+        if "pixels" in params:
+            pixels = number(params["pixels"])
+            if not pixels.is_integer():
+                raise ValueError("scroll pixels must be integer wheel steps")
+            params["pixels"] = int(pixels)
+        if action == "scroll" and "pixels" not in params:
+            raise ValueError("scroll requires pixels")
+        if "time" in params or action == "wait":
+            duration = number(params.get("time", 1.0))
+            if duration < 0:
+                raise ValueError("wait duration must be nonnegative")
+            params["time"] = duration
+        if "status" in params:
+            if not isinstance(params["status"], str) or params["status"].strip().lower() not in {"success", "failure"}:
+                raise ValueError("terminate status must be success or failure")
+            params["status"] = params["status"].strip().lower()
+        if recovering:
+            schema = self._sole_computer_use_tool()["parameters"]
+            properties = schema["properties"]
+            if any(key not in params for key in schema.get("required", [])) or set(params) - properties.keys():
+                raise ValueError("Recovered parameters do not match the configured tool schema")
+            for key, value in params.items():
+                spec = properties[key]
+                valid_type = {"string": isinstance(value, str), "array": isinstance(value, list),
+                              "number": isinstance(value, (int, float)) and not isinstance(value, bool)}
+                if not valid_type.get(spec.get("type"), False) or ("enum" in spec and value not in spec["enum"]):
+                    raise ValueError("Recovered parameters do not match the configured tool schema")
         return params
 
     @staticmethod
@@ -522,19 +736,25 @@ class Qwen35VLAgent(Qwen3VLAgent):
     def _parse_response(
         self, response: str, original_width: int, original_height: int
     ) -> Dict[str, Any]:
+        original_response = response
         thought = ""
-        if not response or not response.strip():
-            return {
-                "actions": [],
-                "metadata": {
-                    "thought": thought,
-                    "conclusion": "cannot parse; waiting",
-                    "action_type": "wait",
-                    "is_terminal": False,
-                    "wait_time": 1.0,
-                    "parse_error": True,
-                },
-            }
+        diagnostics = {"policy": "validate_all_calls_before_execution", "tool_calls": [],
+                       "recovered": False, "errors": [], "execution_status": "planned", "planned_actions": []}
+
+        def reject(message, call_index=None):
+            diagnostics["errors"].append({"call_index": call_index, "message": message})
+
+        def raise_rejected():
+            diagnostics["execution_status"] = "rejected"
+            raise Qwen35ParseError(original_response, {"actions": [], "metadata": {
+                "thought": thought, "conclusion": "Computer-use response rejected",
+                "action_type": "parse_error", "is_terminal": False, "wait_time": None,
+                "parse_error": True, "parsing": diagnostics,
+            }})
+
+        if not isinstance(response, str) or not response.strip():
+            reject("Empty or invalid model response")
+            raise_rejected()
         if "</think>" in response:
             thought = response.split("</think>", 1)[0]
             response = response.split("</think>", 1)[1]
@@ -545,6 +765,37 @@ class Qwen35VLAgent(Qwen3VLAgent):
             if stripped.lower().startswith("action:"):
                 low_level_instruction = stripped.split(":", 1)[-1].strip()
                 break
+
+        validated_calls = []
+        try:
+            payloads = self._tool_payloads(response)
+        except ValueError as exc:
+            reject(str(exc))
+            raise_rejected()
+        for index, payload in enumerate(payloads):
+            record = {"call_index": index, "raw": payload, "function_name": None,
+                      "original_arguments": None, "recovered_call": None, "error": None}
+            diagnostics["tool_calls"].append(record)
+            try:
+                params = self._parse_tool_call(payload, record)
+                params = self._validate_params(params, recovering="recovery_reason" in record)
+                call = {"function_name": "computer_use", "arguments": params}
+                record["validated_call"] = call
+                if "recovery_reason" in record:
+                    record["recovered_call"] = call
+                    diagnostics["recovered"] = True
+                validated_calls.append(params)
+            except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as exc:
+                record["error"] = str(exc)
+                reject(str(exc), index)
+        if (any(call["action"] in {"terminate", "answer"} for call in validated_calls[:-1])):
+            reject("Termination or answer must be the final tool call")
+        if (isinstance(original_width, bool) or isinstance(original_height, bool)
+                or not isinstance(original_width, int) or not isinstance(original_height, int)
+                or original_width <= 0 or original_height <= 0):
+            reject("Screenshot dimensions must be positive integers")
+        if diagnostics["errors"]:
+            raise_rejected()
 
         actions: List[Dict[str, Any]] = []
         is_terminal = False
@@ -624,10 +875,7 @@ class Qwen35VLAgent(Qwen3VLAgent):
                     # degrade to a drag at the target rather than dropping it.
                     actions.append({"mouse": {"left_click_drag": [start, start]}})
             elif action == "scroll":
-                try:
-                    requested_steps = int(float(params.get("pixels", 0)))
-                except Exception:
-                    requested_steps = 0
+                requested_steps = params["pixels"]
                 bounded_steps = max(
                     -SCROLL_STEP_LIMIT, min(SCROLL_STEP_LIMIT, requested_steps)
                 )
@@ -638,11 +886,15 @@ class Qwen35VLAgent(Qwen3VLAgent):
                     # Qwen uses negative=down; the runner scroll action uses
                     # positive=down.
                     actions.append({"mouse": {"scroll": -bounded_steps}})
+                else:
+                    # An explicit zero-wheel request is an intentional no-op
+                    # with a fresh observation, never a parsing fallback.
+                    actions.append({"action": "screenshot"})
             elif action == "wait":
-                try:
-                    wait_time = float(params.get("time", 1.0))
-                except Exception:
-                    wait_time = 1.0
+                wait_time = params["time"]
+                actions.append({"action": "wait", "time": wait_time})
+            elif action in {"screenshot", "noop"}:
+                actions.append({"action": "screenshot"})
             elif action in {"terminate", "answer"}:
                 if action == "terminate":
                     terminate_status = str(params.get("status", "success")).strip().lower()
@@ -658,21 +910,8 @@ class Qwen35VLAgent(Qwen3VLAgent):
                 else:
                     actions.append({"keyboard": {"keys_up": list(reversed(mouse_hold))}})
 
-        for tool_call_match in re.finditer(r"<tool_call>(.*?)</tool_call>", response, re.DOTALL):
-            params = self._parse_xml_tool_call(tool_call_match.group(1))
-            if params:
-                process_params(params)
-
-        if not actions and not is_terminal:
-            match = re.search(r"(\{\"name\"\s*:\s*\"computer_use\".*\})", response, re.DOTALL)
-            if match:
-                params = self._parse_json_tool_call(match.group(1))
-                if params:
-                    process_params(params)
-
-        parse_error = False
-        if not actions and not is_terminal and wait_time is None:
-            parse_error = True
+        for params in validated_calls:
+            process_params(params)
 
         if not low_level_instruction:
             if is_terminal:
@@ -681,9 +920,12 @@ class Qwen35VLAgent(Qwen3VLAgent):
                 low_level_instruction = "Waiting"
             elif actions:
                 low_level_instruction = "Performing action"
-            else:
-                low_level_instruction = "cannot parse; waiting"
-                wait_time = 1.0
+        diagnostics["planned_actions"] = actions
+        diagnostics["intent"] = ("terminal" if is_terminal else "wait" if all(p["action"] == "wait" for p in validated_calls)
+                                  else "screenshot" if all(p["action"] == "screenshot" for p in validated_calls)
+                                  else "noop" if all(p["action"] == "noop" or (p["action"] == "type" and p["text"] == "")
+                                                     or (p["action"] == "scroll" and p["pixels"] == 0 and "coordinate" not in p)
+                                                     for p in validated_calls) else "actions")
 
         metadata: Dict[str, Any] = {
             "thought": thought,
@@ -691,9 +933,8 @@ class Qwen35VLAgent(Qwen3VLAgent):
             "action_type": action_types[0] if action_types else "wait",
             "is_terminal": is_terminal,
             "wait_time": wait_time,
+            "parsing": diagnostics,
         }
-        if parse_error:
-            metadata["parse_error"] = True
         if terminate_status is not None:
             metadata["status"] = terminate_status
         if answer_text is not None:

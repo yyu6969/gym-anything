@@ -6,6 +6,8 @@ import os
 import pickle
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import litellm
 import openai
@@ -19,6 +21,49 @@ from gym_anything.runtime_paths import runtime_paths
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+_provider_metadata = ContextVar("provider_response_metadata", default=None)
+
+
+@contextmanager
+def capture_provider_metadata():
+    """Opt-in, turn-local metadata capture without changing the model-call seam."""
+    record = {}
+    token = _provider_metadata.set(record if _env_flag_enabled("VLM_RETAIN_RESPONSE_METADATA") else None)
+    try:
+        yield record
+    finally:
+        _provider_metadata.reset(token)
+
+
+def _retain_provider_metadata(response) -> None:
+    record = _provider_metadata.get()
+    if record is None:
+        return
+    choice = response.choices[0]
+    message = choice.message
+    calls = getattr(message, "tool_calls", None)
+    fields = getattr(message, "model_fields_set", None)
+    fields = fields if isinstance(fields, (set, frozenset)) else getattr(message, "__dict__", {})
+    field_present = "tool_calls" in fields
+    finish = getattr(choice, "finish_reason", None)
+    finish = finish if isinstance(finish, str) else None
+    record.update({
+        "native_tool_calls_field_present": field_present,
+        "native_tool_calls_present": bool(calls),
+        "native_tool_call_count": len(calls) if isinstance(calls, list) else 0,
+        "legacy_function_call_present": bool(getattr(message, "function_call", None)),
+        "content_present": isinstance(getattr(message, "content", None), str),
+        "reasoning_present": bool(getattr(message, "reasoning", None) or getattr(message, "reasoning_content", None)),
+        "finish_reason": finish if finish in {"stop", "length", "tool_calls", "function_call", "content_filter", None} else "other",
+    })
+    usage = getattr(response, "usage", None)
+    for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = getattr(usage, field, None)
+        if type(value) is int and value >= 0:
+            record[field] = value
+    # Deliberately exclude headers, credentials, arbitrary provider extras,
+    # native function arguments and reasoning text from diagnostic metadata.
+    logger.debug("Provider response metadata: %s", record)
 
 
 class _DisableThinkingViolation(RuntimeError):
@@ -129,7 +174,7 @@ def call_llm(
                 ),
                 max_tokens=max_tokens,
             )
-            logger.debug("Raw response from local LLM: %s", response)
+            _retain_provider_metadata(response)
 
             message = response.choices[0].message
             reasoning_content = getattr(message, "reasoning", None) or getattr(message, "reasoning_content", None)

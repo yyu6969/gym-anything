@@ -211,7 +211,16 @@ class CuaWorldAgent(BaseAgent):
             action_outputs: list[dict[str, Any]] = []
             for _ in range(self._max_steps):
                 started = time.perf_counter()
-                action_groups = await asyncio.to_thread(agent.step, obs, action_outputs)
+                try:
+                    action_groups = await asyncio.to_thread(agent.step, obs, action_outputs)
+                except Exception as exc:
+                    diagnostics = getattr(exc, "parsing_diagnostics", None)
+                    if isinstance(diagnostics, dict):
+                        recorder.record_turn(
+                            response_text=exc.response_text, groups=[], screenshot_path=None,
+                            parsing_failure=diagnostics,
+                        )
+                    raise
                 agent_ms = (time.perf_counter() - started) * 1000
                 env_started = time.perf_counter()
                 action_outputs = []
