@@ -630,26 +630,82 @@ def _aab_context_prompt(
     )
 
 
+def _reference_environment_reuse_prompt(root: Path, excluded_output: Path) -> str:
+    return (
+        "\n\n## Reference Environment Reuse\n\n"
+        f"Historical environment directory (read-only reference): @{root.as_posix()}\n"
+        f"Exclude the current task output and all its descendants: @{excluded_output.as_posix()}\n\n"
+        "Before implementing common software infrastructure from scratch, check for "
+        "previously generated environments for the same software under this directory. "
+        "Inspect immediate task-output directories only, excluding the current task. "
+        "Use result.json and environment/env.json to identify successfully created, "
+        "validated and promoted environments for the same software. Each output may "
+        "contain environment/config/, environment/scripts/, environment/assets/, and "
+        "environment/tasks/. Inspect metadata and relevant implementation files first; "
+        "do not recursively read or copy historical creation_audit/ workspaces, caches, "
+        "checkpoints or logs.\n\n"
+        "Prefer reusing working, compatible implementations over rebuilding equivalent "
+        "infrastructure. Useful references include Docker images and Compose configuration, "
+        "installation scripts, application startup and readiness checks, browser/CDP "
+        "helpers, common runtime setup, and implementations of required functionality. "
+        "Adapt components to the current task's instruction, demonstration, required "
+        "initial state and runtime assumptions, accounting for application versions, "
+        "configuration and data differences. There is no requirement to reconstruct "
+        "all software infrastructure independently.\n\n"
+        "Do not blindly copy an entire previous environment. Do not copy old task "
+        "identity, reconstruction.json, ownership metadata or old task definitions into "
+        "the new environment. Do not blindly reuse another task's initial state, "
+        "completed outcome or evaluator. Do not modify or extend previous environments, "
+        "and never execute setup/reset scripts against the original reference environment. "
+        "Create all new environment files in the current candidate environment; keep "
+        "runtime paths independent of the historical output location. The current task "
+        "instruction and demonstration remain authoritative.\n\n"
+        "If the directory is missing, unreadable, empty, or contains no useful compatible "
+        "reference, continue normal creation. Briefly report which historical environments "
+        "and implementation files you actually reused and adapted, or state that none "
+        "were reused."
+    )
+
+
 def _operation_mode_prompt(
     *,
     creation_mode: str | None,
     canonical_environment_id: str | None,
     protected_task_names: Sequence[str],
     task_instruction: str | None,
+    reference_environment_root: Path | None = None,
+    reference_environment_exclude: Path | None = None,
 ) -> str:
     """Render the create-versus-extend contract for the creation backend."""
 
     if creation_mode is None:
         return ""
     if creation_mode == CREATE_NEW_ENVIRONMENT:
+        restriction = (
+            "Use the supplied environment identity; do not discover, extend or "
+            "modify another task's environment or the reference registry. "
+        )
+        reuse_prompt = ""
+        if reference_environment_root is not None:
+            if reference_environment_exclude is None:
+                raise ValueError("Reference reuse requires the current task output to exclude")
+            restriction = (
+                "Use the supplied environment identity. You may read historical "
+                "environments only as permitted in Reference Environment Reuse below. "
+                "Do not extend or modify another task's environment or the reference registry. "
+            )
+            reuse_prompt = _reference_environment_reuse_prompt(
+                reference_environment_root.expanduser().resolve(),
+                reference_environment_exclude.expanduser().resolve(),
+            )
         return (
             "\n\n## Backend Operation Mode\n\n"
             f"Mode: {CREATE_NEW_ENVIRONMENT}\n\n"
             "The target directory is staging for one task-owned environment. "
             "Create exactly one task with its own initial-state setup and assets. "
-            "Use the supplied environment identity; do not discover, extend or "
-            "modify another task's environment or the reference registry. "
-            "Immutable software images and dependencies may be reused."
+            + restriction
+            + "Immutable software images and dependencies may be reused."
+            + reuse_prompt
         )
     if creation_mode != EXTEND_EXISTING_ENVIRONMENT:
         raise ValueError(f"Unknown creation_mode: {creation_mode!r}")
@@ -730,6 +786,8 @@ def _initial_prompt(
     canonical_environment_id: str | None = None,
     protected_task_names: Sequence[str] = (),
     runner: str | None = None,
+    reference_environment_root: Path | None = None,
+    reference_environment_exclude: Path | None = None,
 ) -> str:
     target = environment_dir.as_posix() if environment_dir is not None else env_dir
     prompt = (
@@ -755,6 +813,8 @@ def _initial_prompt(
             canonical_environment_id=canonical_environment_id,
             protected_task_names=protected_task_names,
             task_instruction=task_instruction,
+            reference_environment_root=reference_environment_root,
+            reference_environment_exclude=reference_environment_exclude,
         )
         + _path_context_prompt(
             reference_root=reference_root,
@@ -780,6 +840,8 @@ def _nudge_prompt(
     canonical_environment_id: str | None = None,
     protected_task_names: Sequence[str] = (),
     runner: str | None = None,
+    reference_environment_root: Path | None = None,
+    reference_environment_exclude: Path | None = None,
 ) -> str:
     prompt = (
         f"reread @{_creation_prompt_path(memory_dir, platform)}. "
@@ -809,6 +871,8 @@ def _nudge_prompt(
                 canonical_environment_id=canonical_environment_id,
                 protected_task_names=protected_task_names,
                 task_instruction=task_instruction,
+                reference_environment_root=reference_environment_root,
+                reference_environment_exclude=reference_environment_exclude,
             )
             + path_context
         )
@@ -828,6 +892,8 @@ def _nudge_prompt(
             canonical_environment_id=canonical_environment_id,
             protected_task_names=protected_task_names,
             task_instruction=task_instruction,
+            reference_environment_root=reference_environment_root,
+            reference_environment_exclude=reference_environment_exclude,
         )
         + path_context
     )
@@ -941,6 +1007,8 @@ def _audit_feedback_prompt(
     canonical_environment_id: str | None = None,
     protected_task_names: Sequence[str] = (),
     runner: str | None = None,
+    reference_environment_root: Path | None = None,
+    reference_environment_exclude: Path | None = None,
 ) -> str:
     prompt = (
         f"An independent audit of your progress was performed. Here is the "
@@ -970,6 +1038,8 @@ def _audit_feedback_prompt(
                 canonical_environment_id=canonical_environment_id,
                 protected_task_names=protected_task_names,
                 task_instruction=task_instruction,
+                reference_environment_root=reference_environment_root,
+                reference_environment_exclude=reference_environment_exclude,
             )
             + path_context
         )
@@ -989,6 +1059,8 @@ def _audit_feedback_prompt(
             canonical_environment_id=canonical_environment_id,
             protected_task_names=protected_task_names,
             task_instruction=task_instruction,
+            reference_environment_root=reference_environment_root,
+            reference_environment_exclude=reference_environment_exclude,
         )
         + path_context
     )
@@ -1026,6 +1098,9 @@ def run_creation_audit(
     pre_audit_validation: Callable[[], None] | None = None,
     runner: str | None = None,
     phase_executor: Callable[[str, str, str, Path | None], None] | None = None,
+    reference_environment_root: Path | None = None,
+    reference_environment_exclude: Path | None = None,
+    candidate_validation_feedback: Callable[[], str | None] | None = None,
 ) -> int:
     if platform not in SUPPORTED_PLATFORMS:
         raise ValueError(
@@ -1067,8 +1142,14 @@ def run_creation_audit(
         "canonical_environment_id": canonical_environment_id,
         "protected_task_names": tuple(protected_task_names),
     }
+    creator_operation_context = dict(operation_context)
+    if reference_environment_root is not None:
+        creator_operation_context.update(
+            reference_environment_root=reference_environment_root,
+            reference_environment_exclude=reference_environment_exclude,
+        )
     _operation_mode_prompt(
-        **operation_context,
+        **creator_operation_context,
         task_instruction=task_instruction,
     )
 
@@ -1208,7 +1289,7 @@ def run_creation_audit(
                 task_instruction,
                 environment_initial_state,
                 video=video_path,
-                **operation_context,
+                **creator_operation_context,
                 **prompt_paths,
             ),
             # Codex cannot accept a caller-selected session id for a fresh exec.
@@ -1237,7 +1318,7 @@ def run_creation_audit(
                 environment_initial_state,
                 software,
                 video=video_path,
-                **operation_context,
+                **creator_operation_context,
                 **prompt_paths,
             ),
         )
@@ -1275,6 +1356,10 @@ def run_creation_audit(
         append_log(f"Audit Round {i + 1} Report Completed")
         audit_text = audit_path.read_text(encoding="utf-8")
         shutil.copy2(audit_path, audits_dir / f"audit_{env_dir}.md")
+        if candidate_validation_feedback is not None:
+            validation_feedback = candidate_validation_feedback()
+            if validation_feedback:
+                audit_text += "\n\n## Candidate validation failure\n\n" + validation_feedback
         execute_phase(
             f"audit-{i + 1}-feedback", "creator",
             _audit_feedback_prompt(
@@ -1284,7 +1369,7 @@ def run_creation_audit(
                 environment_initial_state,
                 software,
                 video=video_path,
-                **operation_context,
+                **creator_operation_context,
                 **prompt_paths,
             ),
         )

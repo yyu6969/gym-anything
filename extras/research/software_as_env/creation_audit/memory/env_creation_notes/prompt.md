@@ -73,6 +73,7 @@ from_config() → env.reset() → [agent interaction] → env.close()
 2. **DISPLAY=:1** - always set this for GUI commands
 3. **Mounts are read-only by default** - use `"mode": "rw"` if writing needed
 4. **Verification is external** - verifier.py is a stub; VLM verification is done separately
+5. **AAB ownership binding is reserved** - the root-level `reconstruction.json` is written only by AAB during promotion. Never create or modify it. Put agent-generated reconstruction documentation in `evidence_docs/reconstruction_notes.json` instead.
 
 ---
 
